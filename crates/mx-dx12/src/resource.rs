@@ -6,6 +6,7 @@ use std::sync::Arc;
 use mx_types as t;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
+use windows::core::Interface;
 
 use crate::conv::{self, SHADER_READ};
 use crate::device::{Recording, Shared};
@@ -373,6 +374,35 @@ pub(crate) struct TextureInner {
 
 #[derive(Clone)]
 pub struct Texture(pub(crate) Arc<TextureInner>);
+
+/// A texture's resource in its home. With enhanced barriers it is created with a layout
+/// (`CreateCommittedResource3`) rather than a legacy state: the tracker records only enhanced
+/// barriers then, and the debug layer refuses those on a texture resting in a legacy state
+/// other than `COMMON` (id 1350, #3).
+fn create_texture_resource(shared: &Shared, d: &D3D12_RESOURCE_DESC, home: D3D12_RESOURCE_STATES, raw: &mut Option<ID3D12Resource>) -> windows::core::Result<()> {
+    let heap = heap_props(D3D12_HEAP_TYPE_DEFAULT);
+    if shared.enhanced_barriers {
+        let device: ID3D12Device10 = shared.device.cast()?;
+        let d1 = D3D12_RESOURCE_DESC1 {
+            Dimension: d.Dimension,
+            Alignment: d.Alignment,
+            Width: d.Width,
+            Height: d.Height,
+            DepthOrArraySize: d.DepthOrArraySize,
+            MipLevels: d.MipLevels,
+            Format: d.Format,
+            SampleDesc: d.SampleDesc,
+            Layout: d.Layout,
+            Flags: d.Flags,
+            SamplerFeedbackMipRegion: D3D12_MIP_REGION::default(),
+        };
+        let layout = crate::track::initial_layout(home);
+        // SAFETY: a plain creation from filled descriptions; no protected session, no castable formats.
+        return unsafe { device.CreateCommittedResource3(&heap, D3D12_HEAP_FLAG_NONE, &d1, layout, None, None::<&ID3D12ProtectedResourceSession>, None, raw) };
+    }
+    // SAFETY: a plain creation from filled descriptions.
+    unsafe { shared.device.CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, d, home, None, raw) }
+}
 
 /// The state a texture rests in: readable through the heap if it may be in it.
 pub(crate) fn home_state(usage: t::TextureUsages) -> D3D12_RESOURCE_STATES {
@@ -1038,13 +1068,7 @@ impl Device {
         let home = home_state(u);
         let label = desc.label.unwrap_or("texture");
         let mut raw: Option<ID3D12Resource> = None;
-        // SAFETY: a plain creation from filled descriptions.
-        unsafe {
-            self.shared
-                .device
-                .CreateCommittedResource(&heap_props(D3D12_HEAP_TYPE_DEFAULT), D3D12_HEAP_FLAG_NONE, &d, home, None, &mut raw)
-        }
-        .map_err(|e| hr_err(label, e))?;
+        create_texture_resource(&self.shared, &d, home, &mut raw).map_err(|e| hr_err(label, e))?;
         let raw = raw.ok_or_else(|| Error::OutOfMemory(label.into()))?;
         crate::set_name(&raw, label);
         Ok(Texture::from_raw_parts(raw, desc, home, self.shared.clone()))

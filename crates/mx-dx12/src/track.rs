@@ -386,6 +386,13 @@ fn push_changes(out: &mut Vec<D3D12_RESOURCE_BARRIER>, raw: &ID3D12Resource, tot
     }
 }
 
+/// The layout a texture resting in `home` is created in when barriers are enhanced: the
+/// same layout the tracker's barriers name for that state, so that the texture never rests
+/// in a legacy state the enhanced barriers cannot take it from (the debug layer's id 1350).
+pub(crate) fn initial_layout(home: D3D12_RESOURCE_STATES) -> D3D12_BARRIER_LAYOUT {
+    enhanced(home).2
+}
+
 /// The synchronisation, access and (for textures) layout a legacy state stands for, in
 /// enhanced barriers. Read states merged by the tracker merge here too; a texture in several
 /// read states is in `GENERIC_READ` (or `DEPTH_STENCIL_READ` when one of them is the depth
