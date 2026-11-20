@@ -232,15 +232,21 @@ fn render_with_bind_groups_and_dynamic_offsets() {
 fn failures_are_errors_not_panics() {
     let _gpu = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let (device, _queue) = open();
-    let scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    // (over the device's limit a buffer is refused as wgpu refuses it, a validation error;
+    // under it, a device without the memory gives out-of-memory: either is an error, not a panic)
+    let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+    let invalid = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let _huge = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("64 TiB"),
         size: 1 << 46,
         usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
-    let err = now(scope.pop());
-    assert!(matches!(err, Some(wgpu::Error::OutOfMemory { .. })), "{err:?}");
+    let (invalid, oom) = (now(invalid.pop()), now(oom.pop()));
+    assert!(
+        matches!(invalid, Some(wgpu::Error::Validation { .. })) || matches!(oom, Some(wgpu::Error::OutOfMemory { .. })),
+        "no error for a 64 TiB buffer: {invalid:?} / {oom:?}"
+    );
 
     let adapter = now(wgpu_mx::custom::instance().request_adapter(&Default::default())).unwrap();
     let missing = wgpu::Features::all() - adapter.features();
