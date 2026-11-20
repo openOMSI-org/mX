@@ -878,6 +878,16 @@ impl Shared {
     }
 }
 
+impl Drop for Shared {
+    /// The device's own objects (the staging ring, the command lists and their allocators,
+    /// what the last submissions keep) go only once the queue is done with them: the debug
+    /// layer reported a resource released while the queue still used it when a program
+    /// ended right after its last frame (#4).
+    fn drop(&mut self) {
+        let _ = self.wait_idle();
+    }
+}
+
 /// The GPU. Cheap to clone; every clone is the same device.
 #[derive(Clone)]
 pub struct Device {
