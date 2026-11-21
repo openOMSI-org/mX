@@ -925,8 +925,13 @@ impl Shared {
         Ok(())
     }
 
+    /// Block until the queue has done everything given to it so far. A swapchain's `Present`
+    /// goes to the queue after the frame's signal, so waiting for the last submission left the
+    /// last frame's presentation running: the swapchain and its buffers went while the queue
+    /// still used them at exit (#4). A new signal comes after it.
     pub fn wait_idle(&self) -> Result<()> {
-        self.poll(Some(self.last_submitted.load(Ordering::Acquire)))
+        let index = self.submit(std::iter::empty()).0;
+        self.poll(Some(index))
     }
 }
 
