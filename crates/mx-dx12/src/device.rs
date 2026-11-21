@@ -1,7 +1,7 @@
 //! Instance, adapters, the device and its queue, submissions and the fence.
 
 use std::any::Any;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -26,6 +26,52 @@ fn validation() -> bool {
         Ok(v) => v != "0",
         Err(_) => cfg!(debug_assertions),
     }
+}
+
+/// Sends the debug layer's messages to the log; without a debugger attached they go nowhere.
+/// Once per device: a device is a singleton per adapter, and adapters are listed more than once.
+fn log_debug_messages(device: &ID3D12Device) {
+    static DEVICES: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    let mut devices = DEVICES.lock();
+    if devices.contains(&(device.as_raw() as usize)) {
+        return;
+    }
+    let Ok(queue) = device.cast::<ID3D12InfoQueue1>() else {
+        log::warn!("mX: the D3D12 debug layer is on, but its messages reach only a debugger (no ID3D12InfoQueue1)");
+        return;
+    };
+    let mut cookie = 0;
+    // SAFETY: a function without context, valid for the whole run.
+    match unsafe { queue.RegisterMessageCallback(Some(debug_message), D3D12_MESSAGE_CALLBACK_FLAG_NONE, std::ptr::null_mut(), &mut cookie) } {
+        Ok(()) => devices.push(device.as_raw() as usize),
+        Err(e) => log::warn!("mX: the D3D12 debug layer's messages reach only a debugger: {e}"),
+    }
+}
+
+unsafe extern "system" fn debug_message(_category: D3D12_MESSAGE_CATEGORY, severity: D3D12_MESSAGE_SEVERITY, id: D3D12_MESSAGE_ID, description: windows::core::PCSTR, _context: *mut std::ffi::c_void) {
+    static SEEN: Mutex<BTreeMap<i32, u64>> = Mutex::new(BTreeMap::new());
+    let level = match severity {
+        D3D12_MESSAGE_SEVERITY_CORRUPTION | D3D12_MESSAGE_SEVERITY_ERROR => log::Level::Error,
+        D3D12_MESSAGE_SEVERITY_WARNING => log::Level::Warn,
+        _ => return,
+    };
+    let n = {
+        let mut seen = SEEN.lock();
+        let n = seen.entry(id.0).or_insert(0);
+        *n += 1;
+        *n
+    };
+    if !worth_logging(n) {
+        return;
+    }
+    // SAFETY: the layer passes a NUL-terminated string, valid for the call.
+    let text = unsafe { description.to_string() }.unwrap_or_default();
+    log::log!(level, "mX D3D12 debug layer (id {}, #{n}): {text}", id.0);
+}
+
+/// Whether the `n`th message of one kind is logged: some come every frame.
+fn worth_logging(n: u64) -> bool {
+    n <= 5 || n.is_multiple_of(1000)
 }
 
 /// The entry point: a DXGI factory and the shader compiler.
@@ -184,6 +230,9 @@ impl Adapter {
             return None;
         }
         let device = device?;
+        if validation() {
+            log_debug_messages(&device);
+        }
         let options = feature(&device, D3D12_FEATURE_D3D12_OPTIONS, D3D12_FEATURE_DATA_D3D12_OPTIONS::default())?;
         if options.ResourceBindingTier.0 < D3D12_RESOURCE_BINDING_TIER_2.0 {
             log::info!("mX: skipping an adapter of resource binding tier 1 (no bindless heap)");
@@ -976,5 +1025,14 @@ impl Queue {
     /// Nanoseconds per timestamp tick (from the queue's timestamp frequency).
     pub fn get_timestamp_period(&self) -> f32 {
         self.shared.timestamp_period
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_kind_of_debug_message_is_logged_five_times_then_every_thousandth() {
+        let logged: Vec<u64> = (1..=3000).filter(|&n| super::worth_logging(n)).collect();
+        assert_eq!(logged, [1, 2, 3, 4, 5, 1000, 2000, 3000]);
     }
 }
