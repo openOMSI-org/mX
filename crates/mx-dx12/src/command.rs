@@ -1,7 +1,9 @@
 //! Command encoders and passes.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::Arc;
 
 use mx_shader::{MAX_ROOT_GROUP, RootKind};
 use mx_types as t;
@@ -9,9 +11,10 @@ use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D12::*;
 
 use crate::conv::SHADER_READ;
-use crate::device::Recording;
+use crate::device::{Recording, Shared};
 use crate::pipeline::{HEAP_PARAM, Layout, SAMPLER_PARAM, SPECIAL_PARAM};
 use crate::resource::{Bound, Footprint, copy_buffer_texture, physical, texture_location};
+use crate::track::Track;
 use crate::{BindGroup, Buffer, ComputePipeline, Device, QuerySet, RenderPipeline, Texture, TextureView, conv};
 
 const GROUPS: usize = MAX_ROOT_GROUP as usize + 1;
@@ -683,15 +686,15 @@ fn bytemuck_u32(v: &[u32]) -> &[u8] {
 }
 
 /// Bindings set on a pass and not yet handed to the command list.
-struct PassState {
-    groups: [Option<BindGroup>; GROUPS],
+pub(crate) struct PassState {
+    pub(crate) groups: [Option<BindGroup>; GROUPS],
     /// Groups whose tables must be written again (bit per group).
-    dirty: u8,
-    immediates: Box<[u8; MAX_IMMEDIATES]>,
-    immediates_dirty: bool,
-    special: Option<[u32; 3]>,
+    pub(crate) dirty: u8,
+    pub(crate) immediates: Box<[u8; MAX_IMMEDIATES]>,
+    pub(crate) immediates_dirty: bool,
+    pub(crate) special: Option<[u32; 3]>,
     /// Offsets added to root uniform buffers' own (`set_buffer_offset`): (group, binding, bytes).
-    offsets: Vec<(u32, u32, u64)>,
+    pub(crate) offsets: Vec<(u32, u32, u64)>,
 }
 
 impl Default for PassState {
@@ -708,12 +711,12 @@ impl Default for PassState {
 }
 
 /// Root-parameter setters of one pipeline kind.
-trait Roots {
+pub(crate) trait Roots {
     fn table(&self, param: u32, gpu: D3D12_GPU_DESCRIPTOR_HANDLE);
     fn constants(&self, param: u32, data: &[u32]);
 }
 
-struct Graphics<'a>(&'a ID3D12GraphicsCommandList);
+pub(crate) struct Graphics<'a>(pub(crate) &'a ID3D12GraphicsCommandList);
 struct Compute<'a>(&'a ID3D12GraphicsCommandList);
 
 // SAFETY (both impls): parameters of the root signature set on the list, data of the size
@@ -736,9 +739,34 @@ impl Roots for Compute<'_> {
     }
 }
 
+/// Where a draw's bindings are recorded: a command list ([`Recording`]) or a render bundle
+/// (`crate::bundle`), which notes the states its resources need for the list it runs in.
+pub(crate) trait Target {
+    fn shared(&self) -> Arc<Shared>;
+    /// `n` consecutive descriptors for a root table (see [`Recording::table`]).
+    fn table(&mut self, n: u32) -> u32;
+    fn need(&mut self, t: &Track, range: Option<crate::track::Range>, state: D3D12_RESOURCE_STATES);
+    fn keep_boxed(&mut self, b: Box<dyn Any + Send + Sync>);
+}
+
+impl Target for Recording {
+    fn shared(&self) -> Arc<Shared> {
+        self.shared.clone()
+    }
+    fn table(&mut self, n: u32) -> u32 {
+        Recording::table(self, n)
+    }
+    fn need(&mut self, t: &Track, range: Option<crate::track::Range>, state: D3D12_RESOURCE_STATES) {
+        self.track.need(t, range, state);
+    }
+    fn keep_boxed(&mut self, b: Box<dyn Any + Send + Sync>) {
+        self.keep.push(b);
+    }
+}
+
 /// After a pipeline is set: the heap tables, and everything else to be set again.
-fn bind_heap(rec: &Recording, r: &impl Roots, state: &mut PassState) {
-    let v = &rec.shared.views;
+pub(crate) fn bind_heap(shared: &Shared, r: &impl Roots, state: &mut PassState) {
+    let v = &shared.views;
     r.table(HEAP_PARAM, v.view_gpu(0));
     r.table(SAMPLER_PARAM, D3D12_GPU_DESCRIPTOR_HANDLE { ptr: v.sampler_gpu });
     state.dirty = !0;
@@ -748,7 +776,7 @@ fn bind_heap(rec: &Recording, r: &impl Roots, state: &mut PassState) {
 
 /// Put the buffers with heap views in the states shaders reach them in (see
 /// `Heap::buffer_states`), unless nothing changed since the last time in this list.
-fn need_heap_buffers(rec: &mut Recording) {
+pub(crate) fn need_heap_buffers(rec: &mut Recording) {
     let shared = rec.shared.clone();
     let heap = shared.heap.lock();
     let settled = rec.track.buffers_settled();
@@ -764,7 +792,7 @@ fn need_heap_buffers(rec: &mut Recording) {
 
 /// Write the root tables the pipeline reads and move their resources to the states they are
 /// read in. Returns whether a storage resource is bound (written).
-fn bind_roots(rec: &mut Recording, r: &impl Roots, layout: &Layout, state: &mut PassState, label: &str) -> bool {
+pub(crate) fn bind_roots(rec: &mut impl Target, r: &impl Roots, layout: &Layout, state: &mut PassState, label: &str) -> bool {
     let mut writes = false;
     for (g, table) in layout.groups.iter().enumerate() {
         let Some(table) = table else { continue };
@@ -775,7 +803,7 @@ fn bind_roots(rec: &mut Recording, r: &impl Roots, layout: &Layout, state: &mut 
             panic!("{label}: draw with nothing bound at @group({g})");
         };
         let first = rec.table(table.len());
-        let shared = rec.shared.clone();
+        let shared = rec.shared();
         let (views, device) = (&shared.views, &shared.device);
         let mut at = first;
         for &(b, kind) in &table.bindings {
@@ -787,7 +815,7 @@ fn bind_roots(rec: &mut Recording, r: &impl Roots, layout: &Layout, state: &mut 
             let src = match (kind, bound) {
                 (RootKind::UniformBuffer, Bound::Buffer { buffer, offset, size, .. }) if extra.is_some() => {
                     let extra = extra.unwrap_or(0);
-                    rec.track.need(&buffer.0.track, None, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+                    rec.need(&buffer.0.track, None, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
                     // (at `set_buffer_offset`'s offset: a view of its own, written into the ring)
                     let desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
                         BufferLocation: buffer.0.va + offset + extra,
@@ -799,29 +827,29 @@ fn bind_roots(rec: &mut Recording, r: &impl Roots, layout: &Layout, state: &mut 
                     continue;
                 }
                 (RootKind::UniformBuffer, Bound::Buffer { buffer, cbv: Some(d), .. }) => {
-                    rec.track.need(&buffer.0.track, None, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+                    rec.need(&buffer.0.track, None, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
                     *d
                 }
                 (RootKind::StorageBuffer { read_only: true }, Bound::Buffer { buffer, srv: Some(d), .. }) => {
-                    rec.track.need(&buffer.0.track, None, SHADER_READ);
+                    rec.need(&buffer.0.track, None, SHADER_READ);
                     *d
                 }
                 (RootKind::StorageBuffer { read_only: false }, Bound::Buffer { buffer, uav: Some(d), .. }) => {
-                    rec.track.need(&buffer.0.track, None, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    rec.need(&buffer.0.track, None, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                     writes = true;
                     *d
                 }
                 (RootKind::Texture, Bound::Texture(v)) => {
-                    rec.track.need(&v.0.texture.0.track, Some(v.0.range()), SHADER_READ);
+                    rec.need(&v.0.texture.0.track, Some(v.0.range()), SHADER_READ);
                     v.0.srv.unwrap_or_else(|| panic!("{label}: the texture at @group({g}) @binding({b}) has no TEXTURE_BINDING usage"))
                 }
                 (RootKind::StorageTexture, Bound::Texture(v)) => {
-                    rec.track.need(&v.0.texture.0.track, Some(v.0.range()), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                    rec.need(&v.0.texture.0.track, Some(v.0.range()), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
                     writes = true;
                     v.0.uav.unwrap_or_else(|| panic!("{label}: the texture at @group({g}) @binding({b}) has no STORAGE_BINDING usage"))
                 }
                 (RootKind::AccelerationStructure, Bound::Tlas(tl, d)) => {
-                    rec.keep(tl.clone());
+                    rec.keep_boxed(Box::new(tl.clone()));
                     *d
                 }
                 _ => mismatch(),
@@ -836,20 +864,20 @@ fn bind_roots(rec: &mut Recording, r: &impl Roots, layout: &Layout, state: &mut 
             unsafe { device.CopyDescriptorsSimple(1, views.view_cpu(at), d.handle(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) };
         }
         r.table(table.param, views.view_gpu(first));
-        rec.keep(group);
+        rec.keep_boxed(Box::new(group));
     }
     state.dirty = 0;
     writes
 }
 
-fn set_immediates(state: &mut PassState, offset: u32, data: &[u8]) {
+pub(crate) fn set_immediates(state: &mut PassState, offset: u32, data: &[u8]) {
     let o = offset as usize;
     assert!(o + data.len() <= MAX_IMMEDIATES, "set_immediates past {MAX_IMMEDIATES} bytes");
     state.immediates[o..o + data.len()].copy_from_slice(data);
     state.immediates_dirty = true;
 }
 
-fn flush_constants(r: &impl Roots, layout: &Layout, state: &mut PassState, special: [u32; 3]) {
+pub(crate) fn flush_constants(r: &impl Roots, layout: &Layout, state: &mut PassState, special: [u32; 3]) {
     if state.immediates_dirty
         && let Some((param, dwords)) = layout.immediates
     {
@@ -869,8 +897,8 @@ fn flush_constants(r: &impl Roots, layout: &Layout, state: &mut PassState, speci
 
 /// A render pass. Ends when dropped.
 pub struct RenderPass<'e> {
-    enc: &'e mut CommandEncoder,
-    state: PassState,
+    pub(crate) enc: &'e mut CommandEncoder,
+    pub(crate) state: PassState,
     pipeline: Option<RenderPipeline>,
     index: Option<(Buffer, u64, t::IndexFormat)>,
     index_dirty: bool,
@@ -925,7 +953,7 @@ impl RenderPass<'_> {
             list.SetPipelineState(&p.pso);
             list.IASetPrimitiveTopology(p.topology);
         }
-        bind_heap(rec, &Graphics(&list), &mut self.state);
+        bind_heap(&rec.shared, &Graphics(&list), &mut self.state);
         rec.keep(pipeline.clone());
         self.pipeline = Some(pipeline.clone());
         self.vertex_dirty = true;
@@ -1202,8 +1230,8 @@ impl RenderPass<'_> {
 
 /// A compute pass. Ends when dropped.
 pub struct ComputePass<'e> {
-    enc: &'e mut CommandEncoder,
-    state: PassState,
+    pub(crate) enc: &'e mut CommandEncoder,
+    pub(crate) state: PassState,
     pipeline: Option<ComputePipeline>,
     end_timestamp: Option<(QuerySet, u32)>,
     labelled: bool,
@@ -1235,7 +1263,7 @@ impl ComputePass<'_> {
             list.SetComputeRootSignature(&p.layout.signature);
             list.SetPipelineState(&p.pso);
         }
-        bind_heap(rec, &Compute(&list), &mut self.state);
+        bind_heap(&rec.shared, &Compute(&list), &mut self.state);
         rec.keep(pipeline.clone());
         self.pipeline = Some(pipeline.clone());
     }

@@ -423,6 +423,7 @@ impl Adapter {
             pending: Mutex::new(None),
             ring: Mutex::new(Ring::new()),
             lists: Mutex::new(Vec::new()),
+            bundle_lists: Mutex::new(Vec::new()),
             compiler: a.compiler.clone(),
             shader_model: a.caps.shader_model,
             enhanced_barriers: a.caps.enhanced_barriers,
@@ -485,7 +486,7 @@ impl Default for DeviceDescriptor<'_> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SubmissionIndex(pub u64);
 
-type ListPair = (ID3D12CommandAllocator, ID3D12GraphicsCommandList);
+pub(crate) type ListPair = (ID3D12CommandAllocator, ID3D12GraphicsCommandList);
 
 /// Compiled shaders by (HLSL, entry point, profile).
 pub(crate) type ShaderCache = HashMap<(String, String, String), Arc<Vec<u8>>>;
@@ -725,6 +726,8 @@ pub(crate) struct Shared {
     /// Staging memory of the queue's writes (used under the `pending` lock).
     ring: Mutex<Ring>,
     lists: Mutex<Vec<ListPair>>,
+    /// Bundle allocators and lists of dropped render bundles, for the next ones.
+    pub bundle_lists: Mutex<Vec<ListPair>>,
     pub compiler: Arc<Compiler>,
     /// Barriers are recorded as enhanced barriers (see `track`).
     pub enhanced_barriers: bool,
