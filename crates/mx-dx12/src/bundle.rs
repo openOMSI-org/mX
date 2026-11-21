@@ -341,7 +341,15 @@ fn bake(shared: &Arc<Shared>, cmds: &[Cmd]) -> Option<Baked> {
         }
     }
     // SAFETY: closes the bundle recorded above.
-    let closed = unsafe { list.Close() }.is_ok();
+    let closed = unsafe { list.Close() };
+    if let Err(e) = &closed {
+        // (the driver refused the bundle: it is replayed, which works but costs the frame's thread)
+        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!("mX: a Direct3D 12 bundle could not be closed ({e}); bundles like it are replayed");
+        }
+    }
+    let closed = closed.is_ok();
     let baked = Baked {
         pair: Some((alloc, list)),
         needs: rec.needs.into_values().collect(),
