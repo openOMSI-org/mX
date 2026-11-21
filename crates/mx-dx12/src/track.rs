@@ -118,6 +118,10 @@ pub(crate) struct Tracker {
     scope: Vec<usize>,
     /// A buffer changed state since [`Tracker::buffers_settled`].
     buffers_moved: bool,
+    /// Upload and readback buffers the list uses: they have no state to track, but the
+    /// submission must keep them like the others until the GPU is done (one dropped right
+    /// after the last frame was released while the queue still read it, #4).
+    held: HashMap<usize, ID3D12Resource, BuildHasherDefault<AddressHasher>>,
 }
 
 fn key(r: &ID3D12Resource) -> usize {
@@ -131,10 +135,11 @@ impl Tracker {
 
     /// Need `state` on `range` of the resource (the whole of it with `None`).
     pub fn need(&mut self, t: &Track, range: Option<Range>, state: D3D12_RESOURCE_STATES) {
+        let k = key(&t.raw);
         if t.fixed {
+            self.held.entry(k).or_insert_with(|| t.raw.clone());
             return;
         }
-        let k = key(&t.raw);
         let e = self.entries.entry(k).or_insert_with(|| Entry {
             states: vec![t.home; t.subresources() as usize],
             track: t.clone(),
