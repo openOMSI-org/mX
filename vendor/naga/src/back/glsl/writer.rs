@@ -24,6 +24,9 @@ pub struct Writer<'a, W> {
     names: crate::FastHashMap<NameKey, String>,
     /// A map with the names of global variables needed for reflections.
     reflection_names_globals: crate::FastHashMap<Handle<crate::GlobalVariable>, String>,
+    /// mX: depth textures the module reads with `textureLoad` and never samples, written as
+    /// `sampler2D` and read with `texelFetch(..).x` (see `depth_fetch_globals`).
+    depth_fetch: crate::FastHashSet<Handle<crate::GlobalVariable>>,
     /// The selected entry point.
     pub(in crate::back::glsl) entry_point: &'a crate::EntryPoint,
     /// The index of the selected entry point.
@@ -105,6 +108,7 @@ impl<'a, W: Write> Writer<'a, W> {
             features: FeaturesManager::new(),
             names,
             reflection_names_globals: crate::FastHashMap::default(),
+            depth_fetch: depth_fetch_globals(module),
             entry_point: &module.entry_points[ep_idx],
             entry_point_idx: ep_idx as u16,
             multiview: pipeline_options.multiview,
@@ -332,8 +336,17 @@ impl<'a, W: Write> Writer<'a, W> {
                 TypeInner::Image {
                     mut dim,
                     arrayed,
-                    class,
+                    mut class,
                 } => {
+                    // mX: a depth texture only loaded from is a plain float texture here
+                    if class == (crate::ImageClass::Depth { multi: false })
+                        && self.depth_fetch.contains(&handle)
+                    {
+                        class = crate::ImageClass::Sampled {
+                            kind: crate::ScalarKind::Float,
+                            multi: false,
+                        };
+                    }
                     // Gather the storage format if needed
                     let storage_format_access = match self.module.types[global.ty].inner {
                         TypeInner::Image {
@@ -1630,7 +1643,7 @@ impl<'a, W: Write> Writer<'a, W> {
                     } = ctx.expressions[handle]
                     {
                         if let TypeInner::Image {
-                            class: crate::ImageClass::Sampled { .. },
+                            class: crate::ImageClass::Sampled { .. } | crate::ImageClass::Depth { .. },
                             ..
                         } = *ctx.resolve_type(image, &self.module.types)
                         {
@@ -4105,11 +4118,20 @@ impl<'a, W: Write> Writer<'a, W> {
                 };
                 ("imageLoad", policy)
             }
-            // TODO: Is there even a function for this?
-            crate::ImageClass::Depth { multi: _ } => {
-                return Err(Error::Custom(
-                    "WGSL `textureLoad` from depth textures is not supported in GLSL".to_string(),
-                ))
+            // mX: a multisampled depth texture is a `sampler2DMS`, and one only loaded from
+            // a `sampler2D` (`depth_fetch_globals`); `texelFetch` reads both, `.x` below
+            crate::ImageClass::Depth { multi } => {
+                let fetchable = multi
+                    || matches!(
+                        ctx.expressions[image],
+                        crate::Expression::GlobalVariable(g) if self.depth_fetch.contains(&g)
+                    );
+                if !fetchable {
+                    return Err(Error::Custom(
+                        "WGSL `textureLoad` from a depth texture that is also sampled is not supported in GLSL".to_string(),
+                    ));
+                }
+                ("texelFetch", self.policies.image_load)
             }
             crate::ImageClass::External => unimplemented!(),
         };
@@ -4118,6 +4140,12 @@ impl<'a, W: Write> Writer<'a, W> {
         let tex_1d_hack = dim == IDim::D1 && self.options.version.is_es();
         // Get the size of the coordinate vector
         let vector_size = self.get_coordinate_vector_size(dim, array_index.is_some());
+
+        // (mX: a depth texel is the first component of what `texelFetch` returns)
+        let depth = matches!(class, crate::ImageClass::Depth { .. });
+        if depth {
+            write!(self.out, "(")?;
+        }
 
         if let proc::BoundsCheckPolicy::ReadZeroSkipWrite = policy {
             // To write the bounds checks for `ReadZeroSkipWrite` we will use a
@@ -4303,9 +4331,10 @@ impl<'a, W: Write> Writer<'a, W> {
         if let proc::BoundsCheckPolicy::ReadZeroSkipWrite = policy {
             // Get the kind of the output value.
             let kind = match class {
-                // Only sampled images can reach here since storage images
-                // don't need bounds checks and depth images aren't implemented
+                // Only sampled and depth images can reach here since storage images
+                // don't need bounds checks
                 crate::ImageClass::Sampled { kind, .. } => kind,
+                crate::ImageClass::Depth { .. } => crate::ScalarKind::Float,
                 _ => unreachable!(),
             };
 
@@ -4322,6 +4351,10 @@ impl<'a, W: Write> Writer<'a, W> {
             write!(self.out, ")")?;
             // Close the parentheses surrounding our ternary
             write!(self.out, ")")?;
+        }
+
+        if depth {
+            write!(self.out, ").x")?;
         }
 
         Ok(())
@@ -4631,4 +4664,44 @@ impl<'a, W: Write> Writer<'a, W> {
             _ => unreachable!(),
         }
     }
+}
+
+/// mX: the depth textures (not multisampled) that `module` reads with `textureLoad` and
+/// never samples. GLSL has no load from a shadow sampler (`sampler2DShadow`), but a depth
+/// texture with no comparison mode can be a `sampler2D` read with `texelFetch`; one that is
+/// sampled as well stays a shadow sampler and its load an error.
+fn depth_fetch_globals(module: &crate::Module) -> crate::FastHashSet<Handle<crate::GlobalVariable>> {
+    let depth = |g: Handle<crate::GlobalVariable>| {
+        matches!(
+            module.types[module.global_variables[g].ty].inner,
+            TypeInner::Image {
+                class: crate::ImageClass::Depth { multi: false },
+                ..
+            }
+        )
+    };
+    let mut loaded = crate::FastHashSet::default();
+    let mut sampled = crate::FastHashSet::default();
+    let functions = module
+        .functions
+        .iter()
+        .map(|(_, f)| f)
+        .chain(module.entry_points.iter().map(|ep| &ep.function));
+    for f in functions {
+        for (_, e) in f.expressions.iter() {
+            let (image, set) = match *e {
+                crate::Expression::ImageLoad { image, .. } => (image, &mut loaded),
+                crate::Expression::ImageSample { image, .. } => (image, &mut sampled),
+                _ => continue,
+            };
+            match f.expressions[image] {
+                crate::Expression::GlobalVariable(g) if depth(g) => {
+                    set.insert(g);
+                }
+                _ => {}
+            }
+        }
+    }
+    loaded.retain(|g| !sampled.contains(g));
+    loaded
 }

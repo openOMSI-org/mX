@@ -310,6 +310,51 @@ mod tests {
         assert!(out.source.contains("buffer"), "{}", out.source);
     }
 
+    /// A depth texture read with `textureLoad` and never sampled (openOMSI's clouds skip
+    /// the pixels its scene covers so) is a `sampler2D` read with `texelFetch`, in GLSL ES
+    /// 3.0 unchecked and in desktop GLSL 4.30 with the bounds checks; a multisampled one is
+    /// read from its `sampler2DMS`. One also sampled with a comparison stays a shadow
+    /// sampler, and its load is refused.
+    #[test]
+    fn depth_textures_only_loaded_from_are_fetched() {
+        let m = Module::from_wgsl(
+            "t",
+            "@group(0) @binding(0) var d: texture_depth_2d;\n@group(0) @binding(1) var dm: texture_depth_multisampled_2d;\nfn covered(p: vec2<i32>) -> bool { return textureLoad(d, p, 0) <= 0.0; }\n@fragment fn fs(@builtin(position) c: vec4<f32>) -> @location(0) vec4<f32> { let p = vec2<i32>(c.xy); return vec4<f32>(select(0.0, 1.0, covered(p)) + textureLoad(dm, p, 1) + f32(textureDimensions(d).x)); }",
+        )
+        .unwrap();
+        let fs = stage(&m, S::Fragment, None, &[]).unwrap();
+        let layout = Layout::for_pipeline(&[&fs]).unwrap();
+        for version in [Version::Embedded { version: 310, is_webgl: false }, Version::Desktop(430)] {
+            let out = write(&m, &fs, 0, &layout, &Options { version, ..OPTIONS }).unwrap();
+            validate(&out.source, S::Fragment);
+            assert!(!out.source.contains("Shadow"), "{}", out.source);
+            assert!(out.source.contains("sampler2D ") && out.source.contains("sampler2DMS "), "{}", out.source);
+            assert_eq!(out.source.matches("texelFetch(").count(), 2, "{}", out.source);
+        }
+        // ES 3.0 has no multisampled textures: the plain one alone
+        let m = Module::from_wgsl(
+            "t",
+            "@group(0) @binding(0) var d: texture_depth_2d;\n@fragment fn fs(@builtin(position) c: vec4<f32>) -> @location(0) vec4<f32> { return vec4<f32>(textureLoad(d, vec2<i32>(c.xy), 0)); }",
+        )
+        .unwrap();
+        let fs = stage(&m, S::Fragment, None, &[]).unwrap();
+        let layout = Layout::for_pipeline(&[&fs]).unwrap();
+        let out = write(&m, &fs, 0, &layout, &OPTIONS).unwrap();
+        validate(&out.source, S::Fragment);
+        assert!(out.source.contains("uniform highp sampler2D ") && out.source.contains(").x"), "{}", out.source);
+        let m = Module::from_wgsl(
+            "t",
+            "@group(0) @binding(0) var d: texture_depth_2d;\n@group(0) @binding(1) var s: sampler_comparison;\n@fragment fn fs(@builtin(position) c: vec4<f32>) -> @location(0) vec4<f32> { return vec4<f32>(textureLoad(d, vec2<i32>(c.xy), 0) + textureSampleCompareLevel(d, s, c.xy, 0.5)); }",
+        )
+        .unwrap();
+        let fs = stage(&m, S::Fragment, None, &[]).unwrap();
+        let layout = Layout::for_pipeline(&[&fs]).unwrap();
+        let Err(e) = write(&m, &fs, 0, &layout, &OPTIONS) else {
+            panic!("a load from a sampled depth texture")
+        };
+        assert!(e.to_string().contains("also sampled"), "{e}");
+    }
+
     #[test]
     fn indices_that_need_bindless_are_refused() {
         let m = Module::from_wgsl(
