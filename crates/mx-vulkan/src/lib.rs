@@ -11,6 +11,8 @@ mod bundle;
 mod command;
 mod conv;
 mod device;
+mod fault;
+pub use fault::fault_report;
 mod heap;
 mod pipeline;
 mod query;
@@ -63,7 +65,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub(crate) fn vk_err(what: &str, e: vk::Result) -> Error {
     match e {
         vk::Result::ERROR_OUT_OF_DEVICE_MEMORY | vk::Result::ERROR_OUT_OF_HOST_MEMORY => Error::OutOfMemory(what.into()),
-        vk::Result::ERROR_DEVICE_LOST => Error::DeviceLost(what.into()),
+        vk::Result::ERROR_DEVICE_LOST => {
+            crate::fault::log_once(what);
+            Error::DeviceLost(what.into())
+        }
         other => Error::Device(format!("{what}: {other}")),
     }
 }

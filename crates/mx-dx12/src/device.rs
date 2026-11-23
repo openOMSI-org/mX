@@ -89,6 +89,7 @@ impl Default for Instance {
 
 impl Instance {
     pub fn new() -> Instance {
+        crate::dred::enable();
         let validate = validation();
         if validate {
             let mut debug: Option<ID3D12Debug> = None;
@@ -230,6 +231,7 @@ impl Adapter {
             return None;
         }
         let device = device?;
+        crate::dred::register(&device);
         if validation() {
             log_debug_messages(&device);
         }
@@ -421,6 +423,8 @@ impl Adapter {
         // SAFETY: as above.
         let fence: ID3D12Fence = unsafe { device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.map_err(|e| hr_err("fence", e))?;
         let views = Views::new(&device, textures, buffers)?;
+        // (every bindless slot starts as a null descriptor, not as whatever the heap held)
+        views.write_nulls(&device, 0..textures, 0..buffers);
         // the heap group's sampler index buffer: sampler heap slot i at index i
         let identity: Vec<u32> = (0..mx_shader::hlsl::SAMPLER_HEAP_SIZE).collect();
         let identity_buffer = crate::resource::upload_buffer(&device, bytes_of_u32(&identity), "mX heap sampler indices")?;
@@ -565,19 +569,22 @@ impl Recording {
                 // SAFETY: the pair's last list finished on the GPU (it came back through
                 // `retire`) or was never submitted.
                 unsafe {
-                    alloc.Reset().expect("ID3D12CommandAllocator::Reset failed");
-                    list.Reset(&alloc, None).expect("ID3D12GraphicsCommandList::Reset failed");
+                    alloc.Reset().unwrap_or_else(|e| crate::dred::fail("ID3D12CommandAllocator::Reset failed", e));
+                    list.Reset(&alloc, None).unwrap_or_else(|e| crate::dred::fail("ID3D12GraphicsCommandList::Reset failed", e));
                 }
                 (alloc, list)
             }
             None => {
                 // SAFETY: plain creations.
                 unsafe {
-                    let alloc: ID3D12CommandAllocator = shared.device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).expect("out of memory for a command allocator");
+                    let alloc: ID3D12CommandAllocator = shared
+                        .device
+                        .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
+                        .unwrap_or_else(|e| crate::dred::fail("no command allocator", e));
                     let list: ID3D12GraphicsCommandList = shared
                         .device
                         .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &alloc, None)
-                        .expect("out of memory for a command list");
+                        .unwrap_or_else(|e| crate::dred::fail("no command list", e));
                     (alloc, list)
                 }
             }
@@ -905,6 +912,7 @@ impl Shared {
         if done == u64::MAX {
             // SAFETY: a plain getter.
             let reason = unsafe { self.device.GetDeviceRemovedReason() };
+            crate::dred::log_once("waiting for the GPU");
             return Err(Error::DeviceLost(format!("device removed: {reason:?}")));
         }
         let finished: Vec<Retired> = {
@@ -920,7 +928,15 @@ impl Shared {
             r.retire(self);
         }
         self.ring.lock().reclaim(done);
-        let textures = self.heap.lock().reclaim(done);
+        let textures = {
+            let mut heap = self.heap.lock();
+            let (textures, tex_slots, buf_slots) = heap.reclaim(done);
+            // (a freed slot's descriptor goes null once the queue has passed its release: a
+            // stale index then reads zeros, not the texture or buffer destroyed here. Under the
+            // heap's lock: a slot handed out again meanwhile would have its new view nulled.)
+            self.views.write_nulls(&self.device, tex_slots, buf_slots);
+            textures
+        };
         drop(textures);
         Ok(())
     }

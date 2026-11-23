@@ -339,6 +339,22 @@ from_backend_error! {
     #[cfg(feature = "noop")] mx_noop;
 }
 
+/// What the backends know of a lost GPU: Direct3D 12's DRED report (the reason, where each
+/// unfinished command list stood, a page fault and the resources there) or Vulkan's
+/// `VK_EXT_device_fault` report. `None` while no device is lost, or where the backend keeps
+/// no such report. The first loss is also written to the log by the backend itself.
+pub fn lost_report() -> Option<String> {
+    #[cfg(windows)]
+    if let Some(r) = mx_dx12::removed_report() {
+        return Some(r);
+    }
+    #[cfg(feature = "vulkan")]
+    if let Some(r) = mx_vulkan::fault_report() {
+        return Some(r);
+    }
+    None
+}
+
 pub type RenderPipelineDescriptor<'a> = mx_types::RenderPipelineDescriptor<'a, ShaderModule>;
 pub type ComputePipelineDescriptor<'a> = mx_types::ComputePipelineDescriptor<'a, ShaderModule>;
 pub type VertexState<'a> = mx_types::VertexState<'a, ShaderModule>;

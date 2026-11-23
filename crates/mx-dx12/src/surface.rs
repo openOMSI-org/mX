@@ -161,7 +161,8 @@ impl Surface<'_> {
         {
             shared.wait_idle().expect("the GPU failed before a swapchain resize");
             // SAFETY: the GPU is idle and the frames handed out were presented (dropped).
-            unsafe { s.raw.ResizeBuffers(buffers, w, h, format, s.flags) }.expect("IDXGISwapChain::ResizeBuffers failed (are textures of the old frames still alive?)");
+            unsafe { s.raw.ResizeBuffers(buffers, w, h, format, s.flags) }
+                .unwrap_or_else(|e| crate::dred::fail("IDXGISwapChain::ResizeBuffers failed (are textures of the old frames still held?)", e));
             // SAFETY: a plain setter.
             let _ = unsafe { s.raw.SetMaximumFrameLatency(config.desired_maximum_frame_latency.max(1)) };
             s.config = config.clone();

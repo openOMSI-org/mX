@@ -22,6 +22,8 @@ mod command;
 mod compiler;
 mod conv;
 mod device;
+mod dred;
+pub use dred::removed_report;
 mod heap;
 mod pipeline;
 mod query;
@@ -79,6 +81,7 @@ pub(crate) fn hr_err(what: &str, e: windows::core::Error) -> Error {
     if code == E_OUTOFMEMORY {
         Error::OutOfMemory(what.into())
     } else if code == DXGI_ERROR_DEVICE_REMOVED || code == DXGI_ERROR_DEVICE_RESET {
+        crate::dred::log_once(what);
         Error::DeviceLost(format!("{what}: {e}"))
     } else {
         Error::Device(format!("{what}: {e}"))

@@ -65,12 +65,14 @@ impl Slots {
         self.deferred.push((after, slot));
     }
 
-    fn reclaim(&mut self, completed: u64) {
+    /// Slots released before `completed` are free again; they are also added to `freed`.
+    fn reclaim(&mut self, completed: u64, freed: &mut Vec<u32>) {
         let free = &mut self.free;
         self.deferred.retain(|&(after, slot)| {
             let done = after <= completed;
             if done {
                 free.push(slot);
+                freed.push(slot);
             }
             !done
         });
@@ -153,6 +155,64 @@ impl Views {
     /// The raw SRV of buffer slot `slot`.
     pub fn buffer_srv(&self, slot: u32) -> u32 {
         self.textures + 1 + slot
+    }
+
+    /// Null descriptors into texture slots `tex` and buffer slots `buf` (both their raw SRV and
+    /// UAV). A slot no view holds kept whatever was there: nothing, on a new heap, or the view of
+    /// a texture or buffer since destroyed. A shader that reached one through a stale or wrong
+    /// index read freed memory, and the GPU faulted - Direct3D 12 removed the device (some
+    /// drivers, some machines). A null descriptor reads zeros.
+    pub fn write_nulls(&self, device: &ID3D12Device, tex: impl IntoIterator<Item = u32>, buf: impl IntoIterator<Item = u32>) {
+        let tex2d = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM,
+            ViewDimension: D3D12_SRV_DIMENSION_TEXTURE2D,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_SRV {
+                    MostDetailedMip: 0,
+                    MipLevels: 1,
+                    PlaneSlice: 0,
+                    ResourceMinLODClamp: 0.0,
+                },
+            },
+        };
+        let srv = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32_TYPELESS,
+            ViewDimension: D3D12_SRV_DIMENSION_BUFFER,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_SRV {
+                    FirstElement: 0,
+                    NumElements: 1,
+                    StructureByteStride: 0,
+                    Flags: D3D12_BUFFER_SRV_FLAG_RAW,
+                },
+            },
+        };
+        let uav = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32_TYPELESS,
+            ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Buffer: D3D12_BUFFER_UAV {
+                    FirstElement: 0,
+                    NumElements: 1,
+                    StructureByteStride: 0,
+                    CounterOffsetInBytes: 0,
+                    Flags: D3D12_BUFFER_UAV_FLAG_RAW,
+                },
+            },
+        };
+        // SAFETY: null descriptors (no resource) into slots no submission reads: a new heap, or
+        // slots whose release the queue has passed.
+        unsafe {
+            for s in tex {
+                device.CreateShaderResourceView(None, Some(&tex2d), self.view_cpu(s));
+            }
+            for s in buf {
+                device.CreateShaderResourceView(None, Some(&srv), self.view_cpu(self.buffer_srv(s)));
+                device.CreateUnorderedAccessView(None, None, Some(&uav), self.view_cpu(self.buffer_uav(s)));
+            }
+        }
     }
 
     /// The raw UAV of buffer slot `slot`.
@@ -269,11 +329,13 @@ impl Heap {
     }
 
     /// Everything released before submission `completed` finished is free again. Returns the
-    /// textures to drop outside the lock (buffers are dropped here: dropping one takes no lock).
-    pub fn reclaim(&mut self, completed: u64) -> Vec<Texture> {
-        self.textures.reclaim(completed);
-        self.samplers.reclaim(completed);
-        self.buffers.reclaim(completed);
+    /// textures to drop outside the lock (buffers are dropped here: dropping one takes no lock)
+    /// and the texture and buffer slots freed, whose descriptors still point at what they held.
+    pub fn reclaim(&mut self, completed: u64) -> (Vec<Texture>, Vec<u32>, Vec<u32>) {
+        let (mut tex_slots, mut buf_slots, mut sampler_slots) = (Vec::new(), Vec::new(), Vec::new());
+        self.textures.reclaim(completed, &mut tex_slots);
+        self.samplers.reclaim(completed, &mut sampler_slots);
+        self.buffers.reclaim(completed, &mut buf_slots);
         self.retired_buffers.retain(|(after, _)| *after > completed);
         let mut done = Vec::new();
         self.retired.retain_mut(|(after, t)| {
@@ -284,7 +346,7 @@ impl Heap {
                 true
             }
         });
-        done
+        (done, tex_slots, buf_slots)
     }
 
     pub fn textures_in_use(&self) -> usize {

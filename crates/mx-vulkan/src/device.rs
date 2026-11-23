@@ -583,6 +583,18 @@ impl Adapter {
             exts.push(khr::ray_query::NAME);
             exts.push(khr::deferred_host_operations::NAME);
         }
+        // (VK_EXT_device_fault where the driver has it: a lost device's report, `fault`)
+        let mut fault = vk::PhysicalDeviceFaultFeaturesEXT::default();
+        let fault_on = self.extensions().iter().any(|e| e.as_c_str() == ext::device_fault::NAME) && {
+            let mut q = vk::PhysicalDeviceFeatures2::default().push_next(&mut fault);
+            // SAFETY: a plain query into a local chain.
+            unsafe { inst.get_physical_device_features2(a.phys, &mut q) };
+            fault.device_fault == vk::TRUE
+        };
+        let mut fault = vk::PhysicalDeviceFaultFeaturesEXT::default().device_fault(fault_on);
+        if fault_on {
+            exts.push(ext::device_fault::NAME);
+        }
         // (what the program asks for besides: DLSS's extensions)
         if !desc.extensions.is_empty() {
             let available = unsafe { inst.enumerate_device_extension_properties(a.phys) }.map_err(|e| vk_err("device extensions", e))?;
@@ -687,8 +699,14 @@ impl Adapter {
         if caps.portability {
             info = info.push_next(&mut port);
         }
+        if fault_on {
+            info = info.push_next(&mut fault);
+        }
         // SAFETY: the create info and its chain point at locals that outlive the call.
         let raw = unsafe { inst.create_device(a.phys, &info, None) }.map_err(|e| vk_err("device", e))?;
+        if fault_on {
+            crate::fault::register(ext::device_fault::Device::new(inst, &raw));
+        }
         // SAFETY: family / index 0 were created above.
         let queue = unsafe { raw.get_device_queue(caps.family, 0) };
 
