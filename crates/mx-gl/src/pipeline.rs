@@ -207,6 +207,23 @@ impl Device {
                 gl.attach_shader(program, sh);
                 shaders.push(sh);
             }
+            // A render pipeline without a fragment stage (depth only: shadow maps, a prepass)
+            // gets an empty fragment shader: OpenGL ES links no program without one
+            // ("must contain objects to form both a vertex and fragment shader"), as
+            // wgpu-hal does.
+            if stages.iter().all(|(_, s)| s.stage == ShaderStage::Vertex) {
+                let sh = gl.create_shader(glow::FRAGMENT_SHADER).map_err(|e| crate::gl_err("shader", e))?;
+                gl.shader_source(sh, &format!("#version {}\nvoid main() {{}}\n", options.version));
+                gl.compile_shader(sh);
+                if !gl.get_shader_compile_status(sh) {
+                    let log = gl.get_shader_info_log(sh);
+                    gl.delete_shader(sh);
+                    gl.delete_program(program);
+                    return Err(pipe_err(format!("the empty fragment shader: {log}")));
+                }
+                gl.attach_shader(program, sh);
+                shaders.push(sh);
+            }
             gl.link_program(program);
             for sh in shaders {
                 gl.detach_shader(program, sh);
