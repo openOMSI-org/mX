@@ -610,7 +610,7 @@ fn run(gl: &glow::Context, shared: &Shared, st: &mut State, cmd: Cmd) {
                 let Pipeline::Render(p) = &st.pipeline else { panic!("draw without a pipeline") };
                 let p = p.clone();
                 prepare_draw(gl, shared, st, &p, instances.start);
-                gl.draw_arrays_instanced(p.0.topology, vertices.start as i32, vertices.len() as i32, instances.len() as i32);
+                draw_arrays(gl, shared, p.0.topology, vertices.start, vertices.len() as u32, instances.len() as u32, instances.start);
             }
             Cmd::DrawIndexed(indices, base_vertex, instances) => {
                 let Pipeline::Render(p) = &st.pipeline else { panic!("draw without a pipeline") };
@@ -621,10 +621,8 @@ fn run(gl: &glow::Context, shared: &Shared, st: &mut State, cmd: Cmd) {
                 let at = (offset + indices.start as u64 * size) as i32;
                 if base_vertex != 0 {
                     assert!(shared.caps.base_vertex, "a base vertex needs OpenGL 3.2 / OpenGL ES 3.2");
-                    gl.draw_elements_instanced_base_vertex(p.0.topology, indices.len() as i32, ty, at, instances.len() as i32, base_vertex);
-                } else {
-                    gl.draw_elements_instanced(p.0.topology, indices.len() as i32, ty, at, instances.len() as i32);
                 }
+                draw_elements(gl, shared, p.0.topology, indices.len() as u32, ty, at, instances.len() as u32, base_vertex, instances.start);
             }
             Cmd::DrawIndirect(args, offset, indexed) => {
                 let Pipeline::Render(p) = &st.pipeline else { panic!("draw without a pipeline") };
@@ -660,18 +658,14 @@ fn run(gl: &glow::Context, shared: &Shared, st: &mut State, cmd: Cmd) {
                             }
                             prepare_draw(gl, shared, st, &p, first_instance);
                             let at = (ioffset + first as u64 * size) as i32;
-                            if base != 0 {
-                                gl.draw_elements_instanced_base_vertex(p.0.topology, count as i32, ty, at, instances as i32, base);
-                            } else {
-                                gl.draw_elements_instanced(p.0.topology, count as i32, ty, at, instances as i32);
-                            }
+                            draw_elements(gl, shared, p.0.topology, count, ty, at, instances, base, first_instance);
                         } else {
                             let (count, instances, first, first_instance) = (a[0], a[1], a[2], a[3]);
                             if count == 0 || instances == 0 {
                                 break 'emulated;
                             }
                             prepare_draw(gl, shared, st, &p, first_instance);
-                            gl.draw_arrays_instanced(p.0.topology, first as i32, count as i32, instances as i32);
+                            draw_arrays(gl, shared, p.0.topology, first, count, instances, first_instance);
                         }
                     }
                 } else {
@@ -1329,6 +1323,42 @@ fn read_back(gl: &glow::Context, shared: &Shared, tex: &Texture, mip: u32, origi
         gl.pixel_store_i32(glow::PACK_ROW_LENGTH, 0);
         gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+    }
+}
+
+/// A non-indexed draw from instance `first_instance`. With draw parameters the shader's
+/// instance index adds `gl_BaseInstance`, which only a base-instance draw sets (GL 4.2);
+/// without, `prepare_draw` has put the first instance in a uniform.
+///
+/// # Safety
+/// The context is current, the draw's state bound.
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_arrays(gl: &glow::Context, shared: &Shared, topology: u32, first: u32, count: u32, instances: u32, first_instance: u32) {
+    // SAFETY: the caller's.
+    unsafe {
+        if shared.caps.draw_parameters && first_instance != 0 {
+            gl.draw_arrays_instanced_base_instance(topology, first as i32, count as i32, instances as i32, first_instance);
+        } else {
+            gl.draw_arrays_instanced(topology, first as i32, count as i32, instances as i32);
+        }
+    }
+}
+
+/// An indexed draw from `at` (bytes into the index buffer), as [`draw_arrays`].
+///
+/// # Safety
+/// As [`draw_arrays`]; a non-zero `base_vertex` needs GL 3.2 / ES 3.2.
+#[allow(clippy::too_many_arguments)]
+unsafe fn draw_elements(gl: &glow::Context, shared: &Shared, topology: u32, count: u32, ty: u32, at: i32, instances: u32, base_vertex: i32, first_instance: u32) {
+    // SAFETY: the caller's.
+    unsafe {
+        if shared.caps.draw_parameters && first_instance != 0 {
+            gl.draw_elements_instanced_base_vertex_base_instance(topology, count as i32, ty, at, instances as i32, base_vertex, first_instance);
+        } else if base_vertex != 0 {
+            gl.draw_elements_instanced_base_vertex(topology, count as i32, ty, at, instances as i32, base_vertex);
+        } else {
+            gl.draw_elements_instanced(topology, count as i32, ty, at, instances as i32);
+        }
     }
 }
 
