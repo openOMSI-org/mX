@@ -2012,11 +2012,10 @@ var<immediate> draw: Draw;
     assert_eq!(out, want);
 }
 
+/// (on every device: without storage buffers - OpenGL 3.3, ES 3.0 - a read-only view of a
+/// fixed size is read as a uniform block)
 #[test]
 fn fragments_read_heap_buffers_chosen_by_immediates() {
-    if lacks_compute() {
-        return;
-    }
     let g = gpu();
     let red = heap_buffer(&g, bytemuck::cast_slice(&[1.0f32, 0.0, 0.0, 1.0]), BufferUsages::empty());
     let green = heap_buffer(&g, bytemuck::cast_slice(&[0.0f32, 1.0, 0.0, 1.0]), BufferUsages::empty());

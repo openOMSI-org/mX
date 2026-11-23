@@ -92,8 +92,14 @@ impl Caps {
                 // by the texture units)
                 max_bindless_textures: 1 << 20,
                 max_bindless_samplers: 1 << 16,
-                max_bindless_buffers: if compute { 1 << 20 } else { 0 },
-                buffer_view_offset_alignment: if compute { get(glow::SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT).max(4) } else { 256 },
+                // (without storage buffers a stage reads the read-only views as uniform blocks,
+                // `bound::views_as_uniforms`: a view's offset is aligned for both)
+                max_bindless_buffers: 1 << 20,
+                buffer_view_offset_alignment: if compute {
+                    get(glow::SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT).max(get(glow::UNIFORM_BUFFER_OFFSET_ALIGNMENT)).max(4)
+                } else {
+                    get(glow::UNIFORM_BUFFER_OFFSET_ALIGNMENT).max(4)
+                },
                 // (immediates are uniforms: wgpu-hal offers 256 bytes on GL)
                 max_immediate_size: 256,
                 max_vertex_buffers: get(glow::MAX_VERTEX_ATTRIBS).min(16),
