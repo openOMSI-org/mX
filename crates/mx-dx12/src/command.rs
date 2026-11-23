@@ -318,7 +318,10 @@ impl CommandEncoder {
         );
         assert_eq!(texture.dimension(), t::TextureDimension::D2, "generate_mipmaps: 2D textures only on Direct3D 12");
         let format = texture.format();
-        let device = Device { shared: self.rec.shared.clone() };
+        let device = Device {
+            shared: self.rec.shared.clone(),
+            owner: None,
+        };
         let (pipeline, sampler) = device.mip_tools(format);
         for layer in 0..texture.layers() {
             for level in 1..texture.mip_level_count() {
@@ -641,7 +644,10 @@ impl CommandEncoder {
             "GPU-driven draw arguments need STORAGE | INDIRECT usage"
         );
         assert!(count.usage().contains(t::BufferUsages::INDIRECT), "a GPU-driven draw count needs INDIRECT usage");
-        let device = Device { shared: self.rec.shared.clone() };
+        let device = Device {
+            shared: self.rec.shared.clone(),
+            owner: None,
+        };
         let tool = device.indirect_tool();
         let n = if draws.0.indexed { 20 } else { 16 };
         let bg = device.create_bind_group(&crate::BindGroupDescriptor {

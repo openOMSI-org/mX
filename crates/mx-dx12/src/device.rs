@@ -497,7 +497,14 @@ impl Adapter {
             mips: Mutex::new(crate::command::MipTools::default()),
             indirect: Mutex::new(None),
         });
-        Ok((Device { shared: shared.clone() }, Queue { shared }))
+        let owner = Some(Arc::new(Owner(shared.clone())));
+        Ok((
+            Device {
+                shared: shared.clone(),
+                owner: owner.clone(),
+            },
+            Queue { shared, owner },
+        ))
     }
 }
 
@@ -961,10 +968,26 @@ impl Drop for Shared {
     }
 }
 
+/// The program's hold on a device: every `Device` and `Queue` it was given (and their clones)
+/// share one. When the last goes, the queue is waited for, which submits the pending queue
+/// writes and reclaims what finished submissions and released views keep. Those keep textures
+/// and buffers, and so the device's shared state: after the program's last submission nothing
+/// reclaimed them, and the device was never released (#4).
+pub(crate) struct Owner(pub(crate) Arc<Shared>);
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        let _ = self.0.wait_idle();
+    }
+}
+
 /// The GPU. Cheap to clone; every clone is the same device.
 #[derive(Clone)]
 pub struct Device {
     pub(crate) shared: Arc<Shared>,
+    /// (held for its drop; none for the device handles mX makes for itself while recording)
+    #[allow(dead_code)]
+    pub(crate) owner: Option<Arc<Owner>>,
 }
 
 impl Device {
@@ -1030,6 +1053,9 @@ impl Device {
 #[derive(Clone)]
 pub struct Queue {
     pub(crate) shared: Arc<Shared>,
+    /// (held for its drop, as the device's)
+    #[allow(dead_code)]
+    pub(crate) owner: Option<Arc<Owner>>,
 }
 
 impl Queue {

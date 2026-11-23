@@ -282,7 +282,7 @@ pub(crate) struct BufferViewInner {
 impl Drop for BufferViewInner {
     fn drop(&mut self) {
         let shared = &self.buffer.0.shared;
-        shared.heap.lock().release_buffer(self.slot, shared.release_after(), self.buffer.clone(), self.writable);
+        shared.heap.lock().release_buffer(self.slot, shared.release_after(), &self.buffer, self.writable);
     }
 }
 
@@ -819,7 +819,7 @@ impl Drop for ViewInner {
     fn drop(&mut self) {
         let shared = &self.texture.0.shared;
         if let Some(slot) = self.slot {
-            shared.heap.lock().release_texture(slot, shared.release_after(), self.texture.clone());
+            shared.heap.lock().release_texture(slot, shared.release_after(), &self.texture);
         }
         let mut cpu = shared.cpu.lock();
         for d in [self.srv, self.uav].into_iter().flatten() {
@@ -1027,7 +1027,11 @@ impl Device {
         if desc.usage.contains(t::BufferUsages::MAP_WRITE) {
             buffer.map_write(0..buffer.size(), |b| b.copy_from_slice(desc.contents))?;
         } else {
-            Queue { shared: self.shared.clone() }.write_buffer(&buffer, 0, desc.contents)?;
+            Queue {
+                shared: self.shared.clone(),
+                owner: None,
+            }
+            .write_buffer(&buffer, 0, desc.contents)?;
         }
         Ok(buffer)
     }

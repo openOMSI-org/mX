@@ -231,10 +231,13 @@ pub(crate) struct Heap {
     textures: Slots,
     samplers: Slots,
     buffers: Slots,
-    /// Textures whose heap view was released but which a submission may still read.
-    retired: Vec<(u64, Texture)>,
+    /// The resources of textures whose heap view was released but which a submission may
+    /// still read. The resource alone, not the `Texture`: a texture holds the device's shared
+    /// state, which holds this list - after the last submission nothing reclaimed it, and the
+    /// device and every texture retired late were never released (#4).
+    retired: Vec<(u64, ID3D12Resource)>,
     /// Buffers likewise.
-    retired_buffers: Vec<(u64, Buffer)>,
+    retired_buffers: Vec<(u64, ID3D12Resource)>,
     /// The buffers with views in the heap (by resource), with how many views and how many
     /// writable ones: a command list keeps them in the state shaders reach them in (see
     /// `Heap::buffer_states`).
@@ -270,7 +273,7 @@ impl Heap {
 
     /// Release a buffer slot (reused after submission `after` is done) and keep the buffer
     /// alive until then.
-    pub fn release_buffer(&mut self, slot: u32, after: u64, buffer: Buffer, writable: bool) {
+    pub fn release_buffer(&mut self, slot: u32, after: u64, buffer: &Buffer, writable: bool) {
         self.buffers.release(slot, after);
         if let Some(e) = self.heap_buffers.get_mut(&buffer.key()) {
             e.1 -= 1;
@@ -280,7 +283,7 @@ impl Heap {
             }
         }
         self.buffer_generation += 1;
-        self.retired_buffers.push((after, buffer));
+        self.retired_buffers.push((after, buffer.0.raw.clone()));
     }
 
     /// The state each buffer with heap views is in while shaders may reach it through the
@@ -306,9 +309,9 @@ impl Heap {
 
     /// Release a texture slot (reused after submission `after` is done) and keep the texture
     /// alive until then.
-    pub fn release_texture(&mut self, slot: u32, after: u64, texture: Texture) {
+    pub fn release_texture(&mut self, slot: u32, after: u64, texture: &Texture) {
         self.textures.release(slot, after);
-        self.retired.push((after, texture));
+        self.retired.push((after, texture.0.raw.clone()));
     }
 
     pub fn alloc_sampler(&mut self) -> Result<u32> {
@@ -329,16 +332,16 @@ impl Heap {
     }
 
     /// Everything released before submission `completed` finished is free again. Returns the
-    /// textures to drop outside the lock (buffers are dropped here: dropping one takes no lock)
-    /// and the texture and buffer slots freed, whose descriptors still point at what they held.
-    pub fn reclaim(&mut self, completed: u64) -> (Vec<Texture>, Vec<u32>, Vec<u32>) {
+    /// textures' resources to release outside the lock and the texture and buffer slots freed,
+    /// whose descriptors still point at what they held.
+    pub fn reclaim(&mut self, completed: u64) -> (Vec<ID3D12Resource>, Vec<u32>, Vec<u32>) {
         let (mut tex_slots, mut buf_slots, mut sampler_slots) = (Vec::new(), Vec::new(), Vec::new());
         self.textures.reclaim(completed, &mut tex_slots);
         self.samplers.reclaim(completed, &mut sampler_slots);
         self.buffers.reclaim(completed, &mut buf_slots);
         self.retired_buffers.retain(|(after, _)| *after > completed);
         let mut done = Vec::new();
-        self.retired.retain_mut(|(after, t)| {
+        self.retired.retain(|(after, t)| {
             if *after <= completed {
                 done.push(t.clone());
                 false
