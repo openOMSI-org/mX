@@ -390,6 +390,142 @@ fn vertex_and_index_buffers_with_depth() {
     assert!(px.iter().all(|p| *p == [0, 0, 255, 255]), "{:?}", px[0]);
 }
 
+/// A pipeline with no fragment stage (depth only, as shadow maps and a depth prepass are
+/// drawn) writes depth that a later pass tests against. OpenGL ES links no program without
+/// a fragment shader: mX gives it an empty one (openOMSI's "shadow clear" failed there).
+#[test]
+fn depth_only_pipelines_draw_without_a_fragment_stage() {
+    let g = gpu();
+    let m = g.shader(
+        "@vertex fn vs_left(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    var q = array<vec2<f32>, 6>(vec2<f32>(-1.0, -1.0), vec2<f32>(0.0, -1.0), vec2<f32>(0.0, 1.0), vec2<f32>(-1.0, -1.0), vec2<f32>(0.0, 1.0), vec2<f32>(-1.0, 1.0));
+    return vec4<f32>(q[i], 0.2, 1.0);
+}
+@vertex fn vs_full(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(p * 2.0 - 1.0, 0.5, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }",
+    );
+    let depth_state = DepthStencilState {
+        format: TextureFormat::Depth32Float,
+        depth_write_enabled: true,
+        depth_compare: CompareFunction::Less,
+        stencil: Default::default(),
+        bias: Default::default(),
+    };
+    let depth_only = g
+        .device
+        .create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("depth only"),
+            vertex: VertexState {
+                module: &m,
+                entry_point: Some("vs_left"),
+                constants: &[],
+                buffers: &[],
+            },
+            primitive: PrimitiveState::default(),
+            depth_stencil: Some(depth_state.clone()),
+            multisample: MultisampleState::default(),
+            fragment: None,
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    let colour = g
+        .device
+        .create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("colour"),
+            vertex: VertexState {
+                module: &m,
+                entry_point: Some("vs_full"),
+                constants: &[],
+                buffers: &[],
+            },
+            primitive: PrimitiveState::default(),
+            depth_stencil: Some(depth_state),
+            multisample: MultisampleState::default(),
+            fragment: Some(FragmentState {
+                module: &m,
+                entry_point: Some("fs"),
+                constants: &[],
+                targets: &[Some(TextureFormat::Rgba8Unorm.into())],
+            }),
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    let depth = g
+        .device
+        .create_texture(&TextureDescriptor {
+            label: Some("depth"),
+            size: Extent3d {
+                width: W,
+                height: H,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format: TextureFormat::Depth32Float,
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .unwrap();
+    let dv = depth.create_view(&Default::default()).unwrap();
+    let (t, tv) = g.target(TextureFormat::Rgba8Unorm);
+    let mut enc = g.device.create_command_encoder(None);
+    {
+        // the depth-only pass: the left half at depth 0.2, no colour target at all
+        let mut rp = enc.begin_render_pass(&RenderPassDescriptor {
+            label: Some("depth only"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: &dv,
+                depth_ops: Some(Operations {
+                    load: LoadOp::Clear(1.0),
+                    store: StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        rp.set_pipeline(&depth_only);
+        rp.draw(0..6, 0..1);
+    }
+    {
+        // red over everything at 0.5: hidden where the depth-only pass drew
+        let mut rp = enc.begin_render_pass(&RenderPassDescriptor {
+            label: Some("colour"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: &tv,
+                resolve_target: None,
+                ops: Operations {
+                    load: LoadOp::Clear(Color::BLACK),
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: &dv,
+                depth_ops: Some(Operations {
+                    load: LoadOp::Load,
+                    store: StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        rp.set_pipeline(&colour);
+        rp.draw(0..3, 0..1);
+    }
+    let px = g.read(enc, &t);
+    let at = |x: u32, y: u32| px[(y * W + x) as usize];
+    for y in [1, H / 2, H - 2] {
+        assert_eq!(at(1, y), [0, 0, 0, 255], "left, row {y}: behind the depth-only quad");
+        assert_eq!(at(W / 4, y), [0, 0, 0, 255], "left, row {y}");
+        assert_eq!(at(W * 3 / 4, y), [255, 0, 0, 255], "right, row {y}");
+        assert_eq!(at(W - 2, y), [255, 0, 0, 255], "right, row {y}");
+    }
+}
+
 #[test]
 fn pipeline_constants_reach_overrides() {
     let g = gpu();
