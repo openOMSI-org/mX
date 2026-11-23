@@ -27,19 +27,21 @@ unless the row says otherwise.
 The no-op backend (`mx-noop`): written and compiled; openOMSI's dedicated server and its
 renderer tests open it.
 
-OpenGL / OpenGL ES (`mx-gl`, the bound tier): the 29 conformance tests pass on ANGLE over
+OpenGL / OpenGL ES (`mx-gl`, the bound tier): the 30 conformance tests pass on ANGLE over
 Metal (OpenGL ES 3.0, the level ANGLE gives older chips; 2026-11-23), compute and the buffer
-heap skipped there for want of ES 3.1. Not yet run on a desktop GL driver or on ANGLE over
-Direct3D 11. See [BOUND_TIER.md](BOUND_TIER.md#status-2026-11-17).
+heap skipped there for want of ES 3.1, and in CI on Mesa's llvmpipe through EGL, as OpenGL ES
+3.2 and as desktop OpenGL 4.5 core. Not yet run on ANGLE over Direct3D 11 or a GPU's own GL
+driver. openOMSI's renderer is made on ANGLE (ES 3.0) and 48 of its 90 GPU tests pass there;
+the others are not yet sorted into what OpenGL's paths leave out and what mX draws wrong. See [BOUND_TIER.md](BOUND_TIER.md#status-2026-11-17).
 
 ## Test suites
 
 | Suite | Result |
 |-------|--------|
-| Conformance tests, 28 (`crates/mx/tests/conformance.rs`) | pass on Metal (2026-11-17), with and without the residency set and with direct heap textures, under Metal's API and shader validation; pass on MoltenVK (27; the dynamic-offset test is new since) |
+| Conformance tests, 30 (`crates/mx/tests/conformance.rs`) | pass on Metal (2026-11-23, under Metal's API and shader validation; earlier with and without the residency set and with direct heap textures); pass on MoltenVK under the Khronos layer with synchronization validation (2026-11-23); pass in CI on lavapipe, WARP and llvmpipe's OpenGL |
 | Pixel parity with wgpu, 7 scenes and 21 of openOMSI's full-screen passes | identical bytes on Metal and on MoltenVK |
 | openOMSI's 23 WGSL modules of its mX renderer (`crates/mx/tests/openomsi`, openOMSI 940ab2f97) | compile through DXC (shader model 6.8) on Direct3D 12 (WARP, in CI), on lavapipe and MoltenVK under the Khronos layer with no findings, and on Metal (2026-11-23) |
-| openOMSI's 17 OpenGL modules (`crates/mx/tests/openomsi_gl`, its `gl_backend()` variants) | every vertex and fragment entry point compiles as GLSL through the driver on ANGLE over Metal (OpenGL ES 3.0, 2026-11-23); the native set compiles on Metal 2 (`MX_METAL_BOUND=1`) |
+| openOMSI's 17 OpenGL modules (`crates/mx/tests/openomsi_gl`, its `gl_backend()` variants) | every vertex and fragment entry point compiles as GLSL through the driver on ANGLE over Metal (OpenGL ES 3.0, 2026-11-23) and in CI on llvmpipe (ES 3.2, GL 4.5 core); the native set compiles on Metal 2 (`MX_METAL_BOUND=1`) |
 | `wgpu-mx` through wgpu's API (`crates/wgpu-mx/tests`) | pass on Metal and MoltenVK |
 | Khronos validation layer with synchronization validation (MoltenVK) | no synchronization findings; two known reports, below (2026-11-17, all 27 tests) |
 | openOMSI's renderer tests on mX's native API (`omsi-render`, 2026-11-17) | 194 on the no-op device and 86 of 90 GPU tests on Metal pass; the 4 others fail the same way on wgpu (see openOMSI's `docs/MX_PORT.md`) |
