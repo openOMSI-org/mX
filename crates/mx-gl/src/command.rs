@@ -629,9 +629,13 @@ fn run(gl: &glow::Context, shared: &Shared, st: &mut State, cmd: Cmd) {
             Cmd::DrawIndirect(args, offset, indexed) => {
                 let Pipeline::Render(p) = &st.pipeline else { panic!("draw without a pipeline") };
                 let p = p.clone();
-                if !shared.caps.indirect {
+                // (without draw parameters the shader's instance index adds the first
+                // instance from a uniform, which a GPU-side draw cannot set; and OpenGL ES's
+                // indirect commands have no first instance at all, "reservedMustBeZero")
+                if !shared.caps.indirect || !shared.caps.draw_parameters {
                     'emulated: {
-                        // OpenGL ES 3.0 (ANGLE over older chips) has no indirect draws: the
+                        // OpenGL ES 3.0 (ANGLE over older chips) has no indirect draws, and
+                        // without draw parameters their first instance is lost: the
                         // arguments are read back and drawn directly (the GPU's earlier work on
                         // them waits; the draw is the same)
                         let len = if indexed { 20 } else { 16 };
@@ -1279,7 +1283,10 @@ pub(crate) fn upload(gl: &glow::Context, tex: &Texture, mip: u32, origin: t::Ori
 #[allow(clippy::too_many_arguments)]
 fn read_back(gl: &glow::Context, shared: &Shared, tex: &Texture, mip: u32, origin: t::Origin3d, dst: &Buffer, layout: t::TexelCopyBufferLayout, size: t::Extent3d) {
     let f = tex.format();
-    assert!(!f.is_compressed(), "copy_texture_to_buffer of compressed textures is not available on OpenGL");
+    if f.is_compressed() {
+        read_back_compressed(gl, shared, tex, mip, origin, dst, layout, size);
+        return;
+    }
     let desc = conv::format(f);
     let block = f.block_copy_size().unwrap_or(4);
     let row_bytes = layout.bytes_per_row.unwrap_or(size.width * block);
@@ -1317,6 +1324,101 @@ fn read_back(gl: &glow::Context, shared: &Shared, tex: &Texture, mip: u32, origi
         gl.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
         gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
     }
+}
+
+/// Read blocks of a compressed texture's mip into a buffer. GL has no framebuffer of a
+/// compressed format (and ES no `glGetCompressedTexImage`): each layer's blocks are copied
+/// with `glCopyImageSubData` (GL 4.3, ES 3.2) into an unsigned integer texture of the
+/// block's size, one texel a block (`RG32UI` for 8 bytes, `RGBA32UI` for 16), read back
+/// through the read framebuffer and written into the buffer row by row.
+#[allow(clippy::too_many_arguments)]
+fn read_back_compressed(gl: &glow::Context, shared: &Shared, tex: &Texture, mip: u32, origin: t::Origin3d, dst: &Buffer, layout: t::TexelCopyBufferLayout, size: t::Extent3d) {
+    let f = tex.format();
+    assert!(
+        shared.caps.copy_image,
+        "copy_texture_to_buffer of compressed textures needs OpenGL 4.3 or OpenGL ES 3.2 (glCopyImageSubData)"
+    );
+    let block = f.block_copy_size().unwrap_or(16);
+    let (bw, bh) = f.block_dimensions();
+    let (blocks_x, blocks_y) = (size.width.div_ceil(bw), size.height.div_ceil(bh));
+    let row_bytes = layout.bytes_per_row.unwrap_or(blocks_x * block) as usize;
+    let block_rows = layout.rows_per_image.map_or(blocks_y, |r| r.div_ceil(bh)) as usize;
+    // (the copy covers the mip's real texels: WebGPU's copy size is whole blocks, past the
+    // edge of a mip smaller than a block, which GL refuses)
+    let mip_w = (tex.width() >> mip).max(1);
+    let mip_h = (tex.size().height >> mip).max(1);
+    let (w, h) = (size.width.min(mip_w - origin.x), size.height.min(mip_h - origin.y));
+    let internal = if block == 8 { glow::RG32UI } else { glow::RGBA32UI };
+    let per_block = (block / 4) as usize;
+    // SAFETY: GL calls on the current context with live objects; a scratch texture made and
+    // deleted here; regions checked by the caller.
+    unsafe {
+        let Ok(scratch) = gl.create_texture() else {
+            log::error!("mX: no texture to read compressed blocks through");
+            return;
+        };
+        gl.bind_texture(glow::TEXTURE_2D, Some(scratch));
+        gl.tex_storage_2d(glow::TEXTURE_2D, 1, internal, blocks_x as i32, blocks_y as i32);
+        gl.bind_texture(glow::TEXTURE_2D, None);
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(shared.fbo_read));
+        gl.framebuffer_texture_2d(glow::READ_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(scratch), 0);
+        gl.read_buffer(glow::COLOR_ATTACHMENT0);
+        gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
+        gl.pixel_store_i32(glow::PACK_ROW_LENGTH, 0);
+        gl.bind_buffer(glow::COPY_WRITE_BUFFER, Some(dst.0.raw));
+        let mut texels = vec![0u32; (blocks_x * blocks_y * 4) as usize];
+        for layer in 0..size.depth_or_array_layers.max(1) {
+            gl.copy_image_sub_data(
+                tex.0.raw,
+                tex.0.target,
+                mip as i32,
+                origin.x as i32,
+                origin.y as i32,
+                (origin.z + layer) as i32,
+                scratch,
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                0,
+                w as i32,
+                h as i32,
+                1,
+            );
+            // (RGBA_INTEGER / UNSIGNED_INT: the read every GL takes for an unsigned integer
+            // framebuffer)
+            gl.read_pixels(
+                0,
+                0,
+                blocks_x as i32,
+                blocks_y as i32,
+                glow::RGBA_INTEGER,
+                glow::UNSIGNED_INT,
+                glow::PixelPackData::Slice(Some(bytemuck_u8(&mut texels))),
+            );
+            let base = layout.offset as usize + layer as usize * row_bytes * block_rows;
+            for y in 0..blocks_y as usize {
+                let mut row = Vec::with_capacity(blocks_x as usize * block as usize);
+                for x in 0..blocks_x as usize {
+                    let t = &texels[(y * blocks_x as usize + x) * 4..][..per_block];
+                    for v in t {
+                        row.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+                gl.buffer_sub_data_u8_slice(glow::COPY_WRITE_BUFFER, (base + y * row_bytes) as i32, &row);
+            }
+        }
+        gl.bind_buffer(glow::COPY_WRITE_BUFFER, None);
+        gl.framebuffer_texture_2d(glow::READ_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, None, 0);
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        gl.delete_texture(scratch);
+    }
+}
+
+/// `u32`s as their bytes.
+fn bytemuck_u8(v: &mut [u32]) -> &mut [u8] {
+    // SAFETY: u32 has no padding and u8 no alignment needs; the length is the same bytes.
+    unsafe { std::slice::from_raw_parts_mut(v.as_mut_ptr().cast::<u8>(), std::mem::size_of_val(v)) }
 }
 
 #[allow(clippy::too_many_arguments)]
