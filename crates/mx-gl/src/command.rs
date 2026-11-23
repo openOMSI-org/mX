@@ -1174,7 +1174,13 @@ pub(crate) fn upload(gl: &glow::Context, tex: &Texture, mip: u32, origin: t::Ori
         }
         let layered = matches!(target, glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D | glow::TEXTURE_CUBE_MAP_ARRAY);
         let depth = size.depth_or_array_layers.max(1);
-        let (x, y, w, h) = (origin.x as i32, origin.y as i32, size.width as i32, size.height as i32);
+        let (x, y, mut w, mut h) = (origin.x as i32, origin.y as i32, size.width as i32, size.height as i32);
+        if f.is_compressed() {
+            // (WebGPU's size is whole blocks, past the edge of a mip smaller than a block;
+            // GL takes the mip's real texels there and refuses more)
+            w = w.min(((tex.width() >> mip).max(1) - origin.x) as i32);
+            h = h.min(((tex.height() >> mip).max(1) - origin.y) as i32);
+        }
         if layered || target != glow::TEXTURE_CUBE_MAP {
             let whole = image_bytes * if layered { depth as u64 } else { 1 };
             match (&src, f.is_compressed(), layered) {
