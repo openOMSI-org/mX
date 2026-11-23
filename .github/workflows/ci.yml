@@ -64,6 +64,14 @@ jobs:
           ! grep -q "mX Vulkan validation error" shaders.log
       - name: wgpu-mx through wgpu's API, and as a wgpu backend
         run: cargo test -p wgpu-mx --features custom
+      - name: Install OpenGL (Mesa llvmpipe, EGL) and Xvfb
+        run: sudo apt-get install -y --no-install-recommends libegl1 libegl-mesa0 libgles2 libgl1-mesa-dri xvfb
+      - name: Conformance and openOMSI's OpenGL shaders on llvmpipe (OpenGL ES, then desktop)
+        env:
+          MX_BACKENDS: gl
+        run: |
+          xvfb-run -a cargo test -p mx --test conformance --test openomsi_shaders -- --test-threads=1 --nocapture
+          MX_GL_DESKTOP=1 xvfb-run -a cargo test -p mx --test conformance --test openomsi_shaders -- --test-threads=1 --nocapture
       - name: Android (Vulkan) compiles
         run: |
           rustup target add aarch64-linux-android

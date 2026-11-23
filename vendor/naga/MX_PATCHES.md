@@ -35,3 +35,17 @@ needs it.
 `back/hlsl/writer.rs`: the special constants (first vertex and instance) and the immediates
 were written as `ConstantBuffer<T>`, which came with shader model 5.1. Below it they are written
 as `cbuffer NameBuffer : register(bN) { T Name; }`, which reads the same.
+
+## `textureLoad` from a depth texture in the GLSL writer
+
+naga's GLSL writer refused every `textureLoad` from a depth texture (GLSL has no load from a
+shadow sampler). openOMSI's screen-space clouds read the scene's depth so (`cloud_covered`),
+and their pipelines failed on OpenGL.
+
+- `back/glsl/writer.rs`, `depth_fetch_globals`: the depth textures (not multisampled) a module
+  loads from and never samples. Such a texture is declared as a `sampler2D` (a depth texture
+  without a comparison mode reads as one) instead of a `sampler2DShadow`.
+- `write_image_load`: a load from one of those, or from a multisampled depth texture (already a
+  `sampler2DMS`), is `texelFetch(..).x`, with the bounds-check policy of sampled images
+  (`Restrict` writes its clamped level for depth textures too). A depth texture that is also
+  sampled stays a shadow sampler, and a load from it is still an error.

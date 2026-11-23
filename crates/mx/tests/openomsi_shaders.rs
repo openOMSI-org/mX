@@ -1,21 +1,21 @@
 //! openOMSI's own WGSL modules, as its renderer assembles them, compile through mX unchanged.
 //!
 //! The modules are in `tests/openomsi` (see its README); `MX_OPENOMSI_SHADERS=<dir>` takes
-//! another set (`python3 tools/openomsi_shaders.py <openOMSI checkout> <dir>`).
+//! another set (`python3 tools/openomsi_shaders.py <openOMSI checkout> <dir>`). On OpenGL
+//! openOMSI assembles variants of its own (`gl_backend()`: no storage buffers, depth read as
+//! float); those are in `tests/openomsi_gl`, `MX_OPENOMSI_GL_SHADERS=<dir>` takes another set.
 
 use mx::*;
 
 #[test]
 fn every_openomsi_module_compiles_for_the_gpu() {
-    let dir = std::env::var("MX_OPENOMSI_SHADERS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/tests/openomsi").to_string());
     let adapter = Instance::new().default_adapter().expect("a GPU mX can use");
     eprintln!("on {:?}", adapter.info());
-    if adapter.is_bound_tier() {
-        // (these are the native renderer's modules - storage buffers, depth read by
-        // textureLoad; on OpenGL openOMSI writes variants of its own, `gl_backend()`)
-        eprintln!("skipped: the bound tier takes openOMSI's OpenGL variants, not these");
-        return;
-    }
+    let dir = if adapter.backend() == Backend::Gl {
+        std::env::var("MX_OPENOMSI_GL_SHADERS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/tests/openomsi_gl").to_string())
+    } else {
+        std::env::var("MX_OPENOMSI_SHADERS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/tests/openomsi").to_string())
+    };
     let (device, _queue) = adapter.request_device(&Default::default()).unwrap();
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
