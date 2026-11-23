@@ -425,7 +425,7 @@ fn depth_only_pipelines_draw_without_a_fragment_stage() {
                 buffers: &[],
             },
             primitive: PrimitiveState::default(),
-            depth_stencil: Some(depth_state.clone()),
+            depth_stencil: Some(depth_state),
             multisample: MultisampleState::default(),
             fragment: None,
         })
