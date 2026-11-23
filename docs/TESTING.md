@@ -17,6 +17,21 @@ device lacks, such as ray queries on MoltenVK, print `skipped` and pass.
 
 A bug fix should come with a test here that fails without the fix.
 
+## openOMSI's shaders
+
+`crates/mx/tests/openomsi_shaders.rs` compiles every entry point of openOMSI's modules for the
+device: the native set (`tests/openomsi`) on Metal, Vulkan, Direct3D 12 and the Metal 2 and
+Direct3D 11 bound tiers, openOMSI's OpenGL variants (`tests/openomsi_gl`) on GL. On a Mac,
+ANGLE's EGL from any Electron app gives OpenGL ES 3.0 over Metal:
+
+```sh
+cp "/Applications/Visual Studio Code.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/"lib{EGL,GLESv2}.dylib /tmp/angle/
+MX_EGL_LIBRARY=/tmp/angle/libEGL.dylib MX_BACKENDS=gl cargo test --release -p mx --test openomsi_shaders -- --nocapture
+```
+
+On Direct3D the compiled shaders are kept on disk between runs (`mx_shader::disk_cache`):
+`MX_SHADER_CACHE=<folder>` puts them there, `MX_SHADER_CACHE=0` turns the cache off.
+
 ## Validation
 
 Metal:

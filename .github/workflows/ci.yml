@@ -123,6 +123,12 @@ jobs:
         run: |
           $dxc = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\dxcompiler.dll" | Sort-Object FullName -Descending | Select-Object -First 1
           if ($dxc) { $env:PATH = "$($dxc.DirectoryName);$env:PATH"; Write-Host "DXC: $($dxc.FullName)" } else { Write-Host "no dxcompiler.dll in the Windows SDK: FXC" }
+          # (once into an empty shader cache, then again from it: what a second start costs)
+          $env:MX_SHADER_CACHE = Join-Path $env:RUNNER_TEMP "mx-shaders"
+          Remove-Item -Recurse -Force $env:MX_SHADER_CACHE -ErrorAction SilentlyContinue
+          cargo test -p mx --test openomsi_shaders -- --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Host "again, from the shader cache:"
           cargo test -p mx --test openomsi_shaders -- --nocapture
       - name: wgpu-mx through wgpu's API, and as a wgpu backend
         run: cargo test -p wgpu-mx --features custom -- --test-threads=1

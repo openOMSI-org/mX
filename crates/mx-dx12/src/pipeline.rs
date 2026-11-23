@@ -169,7 +169,7 @@ impl Device {
             None => {
                 let code = sh
                     .compiler
-                    .compile(&key.0, label, &key.1, &key.2, uses_f16(&m.0.module))
+                    .compile_cached(sh.disk_cache.as_ref(), &key.0, label, &key.1, &key.2, uses_f16(&m.0.module))
                     .map_err(|message| Error::Compile { label: label.clone(), message })?;
                 let code = Arc::new(code);
                 let mut cache = sh.shader_cache.lock();

@@ -22,6 +22,8 @@ pub use naga;
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
 pub mod bound;
+/// Compiled shaders kept on disk between runs (Direct3D's compilers).
+pub mod disk_cache;
 #[cfg(feature = "glsl")]
 pub mod glsl;
 #[cfg(feature = "hlsl")]
