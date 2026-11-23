@@ -910,6 +910,11 @@ unsafe fn bind(gl: &glow::Context, shared: &Shared, st: &mut State, b: &Bindings
                             Some(buf) => gl.bind_buffer_range(glow::SHADER_STORAGE_BUFFER, s.gl as u32, Some(buf.raw), buf.offset as i32, buf.size as i32),
                             None => log::warn!("{label}: heap buffer {index} is empty"),
                         },
+                        // (a read-only view read as a uniform block: `bound::views_as_uniforms`)
+                        Class::UniformBuffer => match heap.buffer(index) {
+                            Some(buf) => gl.bind_buffer_range(glow::UNIFORM_BUFFER, s.gl as u32, Some(buf.raw), buf.offset as i32, buf.size as i32),
+                            None => log::warn!("{label}: heap buffer {index} is empty"),
+                        },
                         _ => {}
                     }
                 }

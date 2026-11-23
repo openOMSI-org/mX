@@ -144,8 +144,10 @@ impl Buffer {
     /// with storage buffers (GL 4.3, ES 3.1).
     pub fn create_view(&self, desc: &t::BufferViewDescriptor<'_>) -> Result<BufferView> {
         let shared = &self.0.shared;
-        if !shared.caps.compute {
-            return Err(Error::Unsupported("storage buffers (OpenGL 4.3 / OpenGL ES 3.1)".into()));
+        // (without storage buffers - OpenGL 3.3, ES 3.0 - a view is writable nowhere and read as
+        // a uniform block: `bound::views_as_uniforms`)
+        if desc.writable && !shared.caps.compute {
+            return Err(Error::Unsupported("writable buffer views (OpenGL 4.3 / OpenGL ES 3.1)".into()));
         }
         let size = desc.resolve(self.size(), self.usage(), &shared.limits);
         let slot = shared.heap.lock().add_buffer(BufferSlot {

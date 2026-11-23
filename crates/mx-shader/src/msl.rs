@@ -191,13 +191,14 @@ pub struct DirectSlot {
     pub root: RootSlot,
 }
 
-/// One entry point in MSL with its heap accesses bound directly: where every heap texture and
-/// sampler it reads is indexed by an immediate (or a constant) - a material's textures - each
-/// becomes a plain texture or sampler argument the backend binds at draw time, from the
-/// immediates, instead of an index into the heap's argument buffer. Apple's GPUs read a texture
-/// argument directly; through the argument buffer each sample loads its descriptor first (the
-/// scene's main pass took an eighth longer). None where the entry point needs real bindless
-/// (an index read from memory) or reads the buffer heap: the bindless form (`write`) then.
+/// One entry point in MSL with its heap accesses bound directly: where every heap texture,
+/// sampler and buffer view it reads is indexed by an immediate (or a constant) - a material's
+/// textures, a frame's buffers - each becomes a plain texture, sampler or buffer argument the
+/// backend binds at draw time, from the immediates, instead of an index into the heap's
+/// argument buffers. Apple's GPUs read a texture argument directly; through the argument
+/// buffer each sample loads its descriptor first (the scene's main pass took an eighth
+/// longer). None where the entry point needs real bindless (an index read from memory), or
+/// reads buffer views and `buffers` is false: the bindless form (`write`) then.
 #[allow(clippy::too_many_arguments)]
 pub fn write_direct(
     m: &Module,
@@ -231,10 +232,13 @@ pub fn write_lowered(
         return Ok(Err("it reads no heap".into()));
     }
     let (module, _) = m.specialize(stage, &name, constants)?;
-    let lowered = match crate::bound::lower(m, module, stage, &name) {
+    let mut lowered = match crate::bound::lower(m, module, stage, &name) {
         Ok(l) => l,
         Err(e) => return Ok(Err(e.to_string())),
     };
+    // (a frame's constants read through a buffer view stay in Metal's constant address space,
+    // where Apple's GPUs read uniforms fastest, as a root uniform buffer's do)
+    crate::bound::views_as_uniforms(&mut lowered);
     if !buffers && lowered.slots.iter().any(|s| heap::is_buffer(s.heap_binding)) {
         return Ok(Err("it reads heap buffers".into()));
     }
@@ -261,7 +265,7 @@ pub fn write_lowered(
             next_buffer += 1;
             RootSlot::Buffer {
                 slot: next_buffer - 1,
-                kind: RootKind::StorageBuffer { read_only: false },
+                kind: if slot.uniform { RootKind::UniformBuffer } else { RootKind::StorageBuffer { read_only: false } },
             }
         } else {
             textures += 1;

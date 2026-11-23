@@ -32,7 +32,7 @@ pub struct Layout {
     pub bindings: BTreeMap<naga::ResourceBinding, (Class, u8)>,
 }
 
-pub use crate::bound::{Stage, stage};
+pub use crate::bound::{Stage, stage, stage_with};
 
 fn root_class(kind: RootKind) -> Class {
     match kind {
@@ -51,6 +51,8 @@ fn slot_class(slot: &Slot) -> Class {
         Class::Texture
     } else if heap::is_sampler(slot.heap_binding) {
         Class::Sampler
+    } else if slot.uniform {
+        Class::UniformBuffer
     } else {
         Class::StorageBuffer
     }
@@ -308,6 +310,45 @@ mod tests {
         .unwrap();
         validate(&out.source, S::Fragment);
         assert!(out.source.contains("buffer"), "{}", out.source);
+    }
+
+    /// Without storage buffers (GLSL ES 3.00) a read-only view of a fixed size - a frame's
+    /// constants - is read as a uniform block; one with a runtime-sized array stays storage.
+    #[test]
+    fn read_only_views_of_a_fixed_size_become_uniform_blocks() {
+        let m = Module::from_wgsl(
+            "t",
+            "struct C { k: vec4<f32>, m: mat4x4<f32> }\n@group(7) @binding(16) var<storage, read> cams: binding_array<C>;\nstruct D { pad: u32, cam: u32 }\nvar<immediate> d: D;\n@fragment fn fs() -> @location(0) vec4<f32> { return cams[d.cam].m * cams[d.cam].k; }",
+        )
+        .unwrap();
+        let fs = crate::bound::stage_with(&m, S::Fragment, None, &[], true).unwrap();
+        assert!(fs.lowered.slots.iter().all(|s| s.uniform && s.index == Index::Immediate(4)), "{:?}", fs.lowered.slots);
+        let layout = Layout::for_pipeline(&[&fs]).unwrap();
+        assert_eq!(layout.slot(0, fs.lowered.slots[0].binding).map(|s| s.0), Some(Class::UniformBuffer));
+        let out = write(
+            &m,
+            &fs,
+            0,
+            &layout,
+            &Options {
+                version: Version::Embedded { version: 300, is_webgl: false },
+                ..OPTIONS
+            },
+        )
+        .unwrap();
+        validate(&out.source, S::Fragment);
+        assert!(!out.source.contains("buffer "), "{}", out.source);
+        // (with storage buffers it stays one)
+        let fs = crate::bound::stage_with(&m, S::Fragment, None, &[], false).unwrap();
+        assert!(fs.lowered.slots.iter().all(|s| !s.uniform));
+        // (a runtime-sized one cannot be a uniform block)
+        let m = Module::from_wgsl(
+            "t",
+            "struct L { l: array<vec4<f32>> }\n@group(7) @binding(16) var<storage, read> lights: binding_array<L>;\nstruct D { lights: u32 }\nvar<immediate> d: D;\n@fragment fn fs() -> @location(0) vec4<f32> { return lights[d.lights].l[0]; }",
+        )
+        .unwrap();
+        let fs = crate::bound::stage_with(&m, S::Fragment, None, &[], true).unwrap();
+        assert!(fs.lowered.slots.iter().all(|s| !s.uniform));
     }
 
     /// A depth texture read with `textureLoad` and never sampled (openOMSI's clouds skip
