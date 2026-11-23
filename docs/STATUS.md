@@ -8,8 +8,8 @@ unless the row says otherwise.
 | Area | Metal | Vulkan | Direct3D 12 |
 |------|-------|--------|-------------|
 | Buffers, textures, views, samplers, the heap | tested | tested on MoltenVK | compiled |
-| Buffer views in the heap (`mx_buffers`, typed views) | written, not yet run | written, not yet run | compiled |
-| GPU-driven batches (`IndirectDraws`) | written, not yet run | written, not yet run | compiled |
+| Buffer views in the heap (`mx_buffers`, typed views) | tested (2026-11-23, under Metal's API and shader validation) | tested on MoltenVK under the Khronos layer with synchronization validation, no findings (2026-11-23); passes on lavapipe in CI | conformance passes on WARP in CI |
+| GPU-driven batches (`IndirectDraws`) | tested (2026-11-23) | passes on lavapipe in CI (MoltenVK has no draw counts: skipped there) | conformance passes on WARP in CI |
 | Narrow barriers (Vulkan) / enhanced barriers (Direct3D 12) | | written, not yet run (unit-tested state machine) | compiled |
 | Render and compute pipelines, root bind groups, immediates, copies | tested | tested on MoltenVK | compiled |
 | MSAA resolve, render bundles, indirect and multi-draw indirect | tested | tested on MoltenVK | compiled |
