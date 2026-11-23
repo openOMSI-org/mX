@@ -4,12 +4,13 @@
 
 use std::ffi::c_void;
 
+use mx_shader::disk_cache::{DiskCache, Key};
 use mx_shader::hlsl::ShaderModel;
 use parking_lot::Mutex;
 use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::Dxc::*;
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::{GetModuleFileNameW, GetProcAddress, LoadLibraryW};
 use windows::core::{GUID, HRESULT, Interface, PCSTR, PCWSTR, s, w};
 
 type DxcCreateInstanceFn = unsafe extern "system" fn(clsid: *const GUID, iid: *const GUID, out: *mut *mut c_void) -> HRESULT;
@@ -49,12 +50,26 @@ pub(crate) enum Compiler {
         compiler: Mutex<IDxcCompiler3>,
         /// The highest shader model this DXC knows (wgpu: DXC 1.x compiles SM 6.x).
         max_shader_model: ShaderModel,
+        /// The compiler's version and build, for the disk cache's keys.
+        identity: String,
         _lib: HMODULE,
     },
     Fxc {
         compile: D3DCompileFn,
+        identity: String,
         _lib: HMODULE,
     },
+}
+
+/// The size of the DLL `lib` was loaded from: two builds of one version differ in it.
+fn dll_size(lib: HMODULE) -> u64 {
+    let mut path = [0u16; 1024];
+    // SAFETY: a module handle of this process and a buffer of the length given.
+    let n = unsafe { GetModuleFileNameW(Some(lib), &mut path) } as usize;
+    if n == 0 || n >= path.len() {
+        return 0;
+    }
+    std::fs::metadata(String::from_utf16_lossy(&path[..n])).map_or(0, |m| m.len())
 }
 
 // SAFETY: the DXC compiler object is only used under its mutex; FXC's D3DCompile is
@@ -119,9 +134,14 @@ impl Compiler {
             // SAFETY: two valid out-pointers.
             let _ = unsafe { v.GetVersion(&mut major, &mut minor) };
         }
+        // (DXC signs its output with dxil.dll where it finds one: a cached unsigned blob must
+        // not be used once it is there, nor the other way round)
+        // SAFETY: as above; DXC loads the same DLL itself when it compiles.
+        let signed = unsafe { LoadLibraryW(w!("dxil.dll")) }.is_ok();
         Ok(Compiler::Dxc {
             compiler: Mutex::new(compiler),
             max_shader_model: shader_model_of_dxc(major, minor),
+            identity: format!("dxc {major}.{minor} {} dxil {signed}", dll_size(lib)),
             _lib: lib,
         })
     }
@@ -134,7 +154,11 @@ impl Compiler {
             let f = GetProcAddress(lib, s!("D3DCompile")).ok_or("d3dcompiler_47.dll has no D3DCompile")?;
             std::mem::transmute::<unsafe extern "system" fn() -> isize, D3DCompileFn>(f)
         };
-        Ok(Compiler::Fxc { compile, _lib: lib })
+        Ok(Compiler::Fxc {
+            compile,
+            identity: format!("fxc {}", dll_size(lib)),
+            _lib: lib,
+        })
     }
 
     /// The highest shader model the compiler takes (`None`: FXC, 5.1 only).
@@ -147,6 +171,34 @@ impl Compiler {
 
     pub fn is_dxc(&self) -> bool {
         matches!(self, Compiler::Dxc { .. })
+    }
+
+    fn identity(&self) -> &str {
+        match self {
+            Compiler::Dxc { identity, .. } | Compiler::Fxc { identity, .. } => identity,
+        }
+    }
+
+    /// As [`Compiler::compile`], through the disk cache when there is one: a shader compiled
+    /// in an earlier run (the same HLSL, entry point, profile, flags and compiler) is read
+    /// back instead of compiled again.
+    pub fn compile_cached(&self, disk: Option<&DiskCache>, source: &str, name: &str, entry: &str, profile: &str, f16: bool) -> Result<Vec<u8>, String> {
+        let flags = format!("debug {} f16 {f16}", debug_shaders());
+        let key = Key {
+            compiler: self.identity(),
+            source,
+            entry,
+            profile,
+            flags: &flags,
+        };
+        if let Some(code) = disk.and_then(|d| d.get(&key)) {
+            return Ok(code);
+        }
+        let code = self.compile(source, name, entry, profile, f16)?;
+        if let Some(d) = disk {
+            d.put(&key, &code);
+        }
+        Ok(code)
     }
 
     /// Compile `source`'s `entry` for `profile` (e.g. `ps_6_5`). `name` names the source in

@@ -16,6 +16,7 @@ hlsl = ["naga/hlsl-out"]
 glsl = ["naga/glsl-out"]
 
 [dependencies]
+log.workspace = true
 naga.workspace = true
 naga-types.workspace = true
 thiserror.workspace = true

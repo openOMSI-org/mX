@@ -70,8 +70,29 @@ unsafe impl Sync for ComputePipelineInner {}
 #[derive(Clone)]
 pub struct ComputePipeline(pub(crate) Arc<ComputePipelineInner>);
 
-/// Compile HLSL with FXC.
-fn compile(label: &str, source: &str, entry: &str, profile: &str) -> Result<ID3DBlob> {
+/// Compile HLSL with FXC, or read what an earlier run compiled from the disk cache
+/// (`mx_shader::disk_cache`: FXC took minutes over openOMSI's scene pipelines on WARP).
+fn compile(label: &str, source: &str, entry: &str, profile: &str) -> Result<Vec<u8>> {
+    static DISK: std::sync::OnceLock<Option<mx_shader::disk_cache::DiskCache>> = std::sync::OnceLock::new();
+    let disk = DISK.get_or_init(mx_shader::disk_cache::DiskCache::from_env).as_ref();
+    let key = mx_shader::disk_cache::Key {
+        compiler: "d3dcompiler_47",
+        source,
+        entry,
+        profile,
+        flags: "O3 strict",
+    };
+    if let Some(code) = disk.and_then(|d| d.get(&key)) {
+        return Ok(code);
+    }
+    let code = bytes(&compile_fxc(label, source, entry, profile)?).to_vec();
+    if let Some(d) = disk {
+        d.put(&key, &code);
+    }
+    Ok(code)
+}
+
+fn compile_fxc(label: &str, source: &str, entry: &str, profile: &str) -> Result<ID3DBlob> {
     let entry = std::ffi::CString::new(entry).expect("an entry point name");
     let profile = std::ffi::CString::new(profile).expect("a profile");
     let mut code = None;
@@ -161,7 +182,7 @@ impl Device {
         let vblob = compile(label, &vout.source, &vout.entry_point, &vout.profile)?;
         let mut vs = None;
         // SAFETY: bytecode FXC made.
-        unsafe { device.CreateVertexShader(bytes(&vblob), None, Some(&mut vs)) }.map_err(|e| hr("vertex shader", e))?;
+        unsafe { device.CreateVertexShader(&vblob, None, Some(&mut vs)) }.map_err(|e| hr("vertex shader", e))?;
         let vs = vs.ok_or_else(|| pipe_err("no vertex shader".into()))?;
         let targets = desc.fragment.as_ref().map_or(&[][..], |f| f.targets);
         let uav_base = targets.len() as u32;
@@ -171,7 +192,7 @@ impl Device {
                 let blob = compile(label, &out.source, &out.entry_point, &out.profile)?;
                 let mut ps = None;
                 // SAFETY: bytecode FXC made.
-                unsafe { device.CreatePixelShader(bytes(&blob), None, Some(&mut ps)) }.map_err(|e| hr("pixel shader", e))?;
+                unsafe { device.CreatePixelShader(&blob, None, Some(&mut ps)) }.map_err(|e| hr("pixel shader", e))?;
                 (ps, bindings(&out))
             }
             None => (None, StageBindings::default()),
@@ -200,7 +221,7 @@ impl Device {
         } else {
             let mut l = None;
             // SAFETY: the elements and the vertex shader's bytecode.
-            unsafe { device.CreateInputLayout(&elements, bytes(&vblob), Some(&mut l)) }.map_err(|e| pipe_err(format!("the vertex buffers do not match the vertex shader: {e}")))?;
+            unsafe { device.CreateInputLayout(&elements, &vblob, Some(&mut l)) }.map_err(|e| pipe_err(format!("the vertex buffers do not match the vertex shader: {e}")))?;
             l
         };
 
@@ -289,7 +310,7 @@ impl Device {
         let blob = compile(label, &out.source, &out.entry_point, &out.profile)?;
         let mut cs = None;
         // SAFETY: bytecode FXC made.
-        unsafe { self.shared.device.CreateComputeShader(bytes(&blob), None, Some(&mut cs)) }.map_err(|e| hr("compute shader", e))?;
+        unsafe { self.shared.device.CreateComputeShader(&blob, None, Some(&mut cs)) }.map_err(|e| hr("compute shader", e))?;
         Ok(ComputePipeline(Arc::new(ComputePipelineInner {
             cs: cs.ok_or_else(|| Error::Pipeline {
                 label: label.into(),

@@ -494,6 +494,7 @@ impl Adapter {
             null_rtv,
             _identity_buffer: identity_buffer,
             shader_cache: Mutex::new(HashMap::new()),
+            disk_cache: mx_shader::disk_cache::DiskCache::from_env(),
             mips: Mutex::new(crate::command::MipTools::default()),
             indirect: Mutex::new(None),
         });
@@ -804,6 +805,8 @@ pub(crate) struct Shared {
     _identity_buffer: ID3D12Resource,
     /// Compiled shaders by (HLSL, entry point, profile), as wgpu-hal's cache.
     pub shader_cache: Mutex<ShaderCache>,
+    /// Compiled shaders on disk, kept between runs (`mx_shader::disk_cache`; `None`: off).
+    pub disk_cache: Option<mx_shader::disk_cache::DiskCache>,
     pub mips: Mutex<crate::command::MipTools>,
     /// The compute pipeline that lays out GPU-driven draw arguments for `ExecuteIndirect`.
     pub indirect: Mutex<Option<crate::ComputePipeline>>,

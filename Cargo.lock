@@ -946,6 +946,7 @@ dependencies = [
 name = "mx-shader"
 version = "0.1.0"
 dependencies = [
+ "log",
  "naga 30.0.2",
  "naga-types",
  "thiserror 2.0.21",

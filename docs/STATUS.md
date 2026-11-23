@@ -112,6 +112,15 @@ through its device proxy), and FSR 3 on Vulkan with one queue for all of AMD's r
 - `mx-dx11`, Direct3D 11 (feature level 11.0, `ID3D11DeviceContext1`): compiled, not run.
   `Backends::DX11`, `MX_BACKENDS=dx11`. See BOUND_TIER.md.
 
+## Shader cache on disk (2026-11-23)
+
+Direct3D 12 (DXC or FXC) and Direct3D 11 (FXC) keep the bytecode they compile on disk,
+keyed by the HLSL, entry point, profile, flags and the compiler's build
+(`mx_shader::disk_cache`; `%LOCALAPPDATA%\mX\shaders`, `MX_SHADER_CACHE`). A second start
+no longer compiles openOMSI's scene module again (some 15 s in DXC on WARP). The cache's
+logic is unit-tested on every platform; CI on Windows runs openOMSI's shaders once into an
+empty cache and once from it.
+
 ## Not done yet
 
 - `examples/bench.rs` on Metal and MoltenVK.
