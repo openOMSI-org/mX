@@ -55,6 +55,13 @@ jobs:
           set -o pipefail
           cargo test -p mx --test conformance -- --test-threads=1 2>&1 | tee validation.log
           ! grep -q "mX Vulkan validation error" validation.log
+      - name: openOMSI's shaders on lavapipe under the validation layer
+        env:
+          VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
+        run: |
+          set -o pipefail
+          cargo test -p mx --test openomsi_shaders -- --nocapture 2>&1 | tee shaders.log
+          ! grep -q "mX Vulkan validation error" shaders.log
       - name: wgpu-mx through wgpu's API, and as a wgpu backend
         run: cargo test -p wgpu-mx --features custom
       - name: Android (Vulkan) compiles
@@ -101,5 +108,13 @@ jobs:
         run: cargo test -p mx-types -p mx-shader --all-features
       - name: Conformance tests on WARP
         run: cargo test -p mx --test conformance -- --test-threads=1
+      # (openOMSI's shaders through DXC, as the game ships it: the Windows SDK's dxcompiler.dll
+      # and dxil.dll on the path, or mX falls back to FXC)
+      - name: openOMSI's shaders through DXC on WARP
+        shell: pwsh
+        run: |
+          $dxc = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\dxcompiler.dll" | Sort-Object FullName -Descending | Select-Object -First 1
+          if ($dxc) { $env:PATH = "$($dxc.DirectoryName);$env:PATH"; Write-Host "DXC: $($dxc.FullName)" } else { Write-Host "no dxcompiler.dll in the Windows SDK: FXC" }
+          cargo test -p mx --test openomsi_shaders -- --nocapture
       - name: wgpu-mx through wgpu's API, and as a wgpu backend
         run: cargo test -p wgpu-mx --features custom -- --test-threads=1

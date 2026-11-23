@@ -1,18 +1,15 @@
 //! openOMSI's own WGSL modules, as its renderer assembles them, compile through mX unchanged.
 //!
-//! Needs the modules on disk: `python3 tools/openomsi_shaders.py <openOMSI checkout> <dir>`,
-//! then `MX_OPENOMSI_SHADERS=<dir> cargo test -p mx --test openomsi_shaders`. Without the
-//! variable the test says so and passes.
+//! The modules are in `tests/openomsi` (see its README); `MX_OPENOMSI_SHADERS=<dir>` takes
+//! another set (`python3 tools/openomsi_shaders.py <openOMSI checkout> <dir>`).
 
 use mx::*;
 
 #[test]
 fn every_openomsi_module_compiles_for_the_gpu() {
-    let Ok(dir) = std::env::var("MX_OPENOMSI_SHADERS") else {
-        eprintln!("skipped: set MX_OPENOMSI_SHADERS (see tools/openomsi_shaders.py)");
-        return;
-    };
+    let dir = std::env::var("MX_OPENOMSI_SHADERS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/tests/openomsi").to_string());
     let adapter = Instance::new().default_adapter().expect("a GPU mX can use");
+    eprintln!("on {:?}", adapter.info());
     let (device, _queue) = adapter.request_device(&Default::default()).unwrap();
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
