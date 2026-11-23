@@ -17,6 +17,17 @@ struct Gpu {
 /// once (the test threads), the M4 sometimes returns timestamps of 0. A game has one device.
 static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Whether the GPU lacks compute shaders or the buffer heap (OpenGL ES 3.0, OpenGL below 4.3:
+/// ANGLE over older chips); the tests of them say so and pass.
+fn lacks_compute() -> bool {
+    let a = Instance::new().default_adapter().expect("a GPU mX can use");
+    let lacks = !a.supports_compute() || a.limits().max_bindless_buffers == 0;
+    if lacks {
+        eprintln!("skipped: no compute shaders or storage buffers on this GPU");
+    }
+    lacks
+}
+
 fn gpu() -> Gpu {
     let guard = GPU.lock().unwrap_or_else(|e| e.into_inner());
     let adapter = Instance::new().default_adapter().expect("a GPU mX can use");
@@ -398,6 +409,9 @@ fn pipeline_constants_reach_overrides() {
 
 #[test]
 fn compute_with_runtime_sized_storage() {
+    if lacks_compute() {
+        return;
+    }
     let g = gpu();
     let m = g.shader(
         "@group(0) @binding(0) var<storage, read> src: array<u32>;
@@ -658,6 +672,9 @@ fn render_bundles_replay_without_leaking_state() {
 
 #[test]
 fn indirect_dispatch_and_clear_buffer() {
+    if lacks_compute() {
+        return;
+    }
     let g = gpu();
     let m = g.shader(
         "@group(0) @binding(0) var<storage, read_write> out: array<u32>;
@@ -1430,6 +1447,9 @@ fn clear_texture_zeroes_its_range() {
 /// set for each dispatch): a reduction through it, two arrays of different sizes.
 #[test]
 fn workgroup_memory_is_shared() {
+    if lacks_compute() {
+        return;
+    }
     let g = gpu();
     let m = g.shader(
         "@group(0) @binding(0) var<storage, read_write> out: array<u32>;
@@ -1783,6 +1803,9 @@ fn heap_buffer(g: &Gpu, data: &[u8], usage: BufferUsages) -> Buffer {
 
 #[test]
 fn buffers_in_the_heap_need_no_bind_groups() {
+    if lacks_compute() {
+        return;
+    }
     let g = gpu();
     // a typed read-only view at an offset, the words of a writable view, chosen by immediates
     let m = g.shader(
@@ -1855,6 +1878,9 @@ var<immediate> draw: Draw;
 
 #[test]
 fn fragments_read_heap_buffers_chosen_by_immediates() {
+    if lacks_compute() {
+        return;
+    }
     let g = gpu();
     let red = heap_buffer(&g, bytemuck::cast_slice(&[1.0f32, 0.0, 0.0, 1.0]), BufferUsages::empty());
     let green = heap_buffer(&g, bytemuck::cast_slice(&[0.0f32, 1.0, 0.0, 1.0]), BufferUsages::empty());
@@ -1886,6 +1912,9 @@ var<immediate> draw: Draw;
 
 #[test]
 fn heap_buffers_see_writes_of_earlier_passes_and_copies() {
+    if lacks_compute() {
+        return;
+    }
     let g = gpu();
     // pass 1 writes through the heap, a copy overwrites part of it, pass 2 reads both
     let fill = g.shader(
@@ -1964,6 +1993,9 @@ var<immediate> draw: Draw;
 
 #[test]
 fn buffer_heap_slots_are_reused_only_after_the_gpu_is_done() {
+    if lacks_compute() {
+        return;
+    }
     let g = gpu();
     let b = heap_buffer(&g, &[0; 16], BufferUsages::empty());
     let first = b.create_view(&Default::default()).unwrap();

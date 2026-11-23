@@ -122,10 +122,40 @@ impl Device {
 
     /// Lower the heap of every entry point now (GLSL is compiled with the pipeline, which
     /// numbers the bindings of its stages together).
+    /// Each entry point lowered to the bound tier, written as this context's GLSL and compiled
+    /// by the driver, on its own (a pipeline's stages are linked when it is made). Before, only
+    /// the lowering was tried: a module the driver's GLSL compiler refused passed.
     pub fn precompile(&self, module: &ShaderModule) -> Result<()> {
+        let options = self.options();
         for ep in &module.0.module.module.entry_points {
-            if matches!(ep.stage, ShaderStage::Vertex | ShaderStage::Fragment | ShaderStage::Compute) {
-                glsl::stage(&module.0.module, ep.stage, Some(&ep.name), &[])?;
+            let kind = match ep.stage {
+                ShaderStage::Vertex => glow::VERTEX_SHADER,
+                ShaderStage::Fragment => glow::FRAGMENT_SHADER,
+                ShaderStage::Compute if self.shared.caps.compute => glow::COMPUTE_SHADER,
+                _ => continue,
+            };
+            let stage = glsl::stage(&module.0.module, ep.stage, Some(&ep.name), &[])?;
+            let layout = glsl::Layout::for_pipeline(&[&stage]).map_err(|message| Error::Compile {
+                label: module.0.module.label.clone(),
+                message,
+            })?;
+            let out = glsl::write(&module.0.module, &stage, 0, &layout, &options)?;
+            let gl = self.shared.ctx.lock();
+            // SAFETY: a shader made, compiled and deleted here, on the current context.
+            unsafe {
+                let sh = gl.create_shader(kind).map_err(|e| crate::gl_err("shader", e))?;
+                gl.shader_source(sh, &out.source);
+                gl.compile_shader(sh);
+                let ok = gl.get_shader_compile_status(sh);
+                let log = if ok { String::new() } else { gl.get_shader_info_log(sh) };
+                gl.delete_shader(sh);
+                if !ok {
+                    log::debug!("{}: GLSL that failed:\n{}", ep.name, out.source);
+                    return Err(Error::Compile {
+                        label: module.0.module.label.clone(),
+                        message: format!("{}: {}", ep.name, if log.trim().is_empty() { "the driver gave no log" } else { &log }),
+                    });
+                }
             }
         }
         Ok(())

@@ -10,6 +10,12 @@ fn every_openomsi_module_compiles_for_the_gpu() {
     let dir = std::env::var("MX_OPENOMSI_SHADERS").unwrap_or_else(|_| concat!(env!("CARGO_MANIFEST_DIR"), "/tests/openomsi").to_string());
     let adapter = Instance::new().default_adapter().expect("a GPU mX can use");
     eprintln!("on {:?}", adapter.info());
+    if adapter.is_bound_tier() {
+        // (these are the native renderer's modules - storage buffers, depth read by
+        // textureLoad; on OpenGL openOMSI writes variants of its own, `gl_backend()`)
+        eprintln!("skipped: the bound tier takes openOMSI's OpenGL variants, not these");
+        return;
+    }
     let (device, _queue) = adapter.request_device(&Default::default()).unwrap();
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()

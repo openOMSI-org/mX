@@ -629,16 +629,58 @@ fn run(gl: &glow::Context, shared: &Shared, st: &mut State, cmd: Cmd) {
             Cmd::DrawIndirect(args, offset, indexed) => {
                 let Pipeline::Render(p) = &st.pipeline else { panic!("draw without a pipeline") };
                 let p = p.clone();
-                assert!(shared.caps.indirect, "indirect draws need OpenGL 4.0 / OpenGL ES 3.1");
-                prepare_draw(gl, shared, st, &p, 0);
-                gl.bind_buffer(glow::DRAW_INDIRECT_BUFFER, Some(args.0.raw));
-                if indexed {
-                    let (_, _, f) = st.index.clone().expect("draw_indexed_indirect without an index buffer");
-                    gl.draw_elements_indirect_offset(p.0.topology, conv::index_type(f).0, offset as i32);
+                if !shared.caps.indirect {
+                    'emulated: {
+                        // OpenGL ES 3.0 (ANGLE over older chips) has no indirect draws: the
+                        // arguments are read back and drawn directly (the GPU's earlier work on
+                        // them waits; the draw is the same)
+                        let len = if indexed { 20 } else { 16 };
+                        let mut a = [0u32; 5];
+                        gl.bind_buffer(glow::COPY_READ_BUFFER, Some(args.0.raw));
+                        let ptr = gl.map_buffer_range(glow::COPY_READ_BUFFER, offset as i32, len, glow::MAP_READ_BIT);
+                        if !ptr.is_null() {
+                            std::ptr::copy_nonoverlapping(ptr, a.as_mut_ptr() as *mut u8, len as usize);
+                            gl.unmap_buffer(glow::COPY_READ_BUFFER);
+                        }
+                        gl.bind_buffer(glow::COPY_READ_BUFFER, None);
+                        if indexed {
+                            let (count, instances, first, base, first_instance) = (a[0], a[1], a[2], a[3] as i32, a[4]);
+                            let (_, ioffset, f) = st.index.clone().expect("draw_indexed_indirect without an index buffer");
+                            let (ty, size) = conv::index_type(f);
+                            if count == 0 || instances == 0 {
+                                break 'emulated;
+                            }
+                            if base != 0 && !shared.caps.base_vertex {
+                                log::warn!("mX: an indirect draw with a base vertex left out (OpenGL ES 3.0 has none)");
+                                break 'emulated;
+                            }
+                            prepare_draw(gl, shared, st, &p, first_instance);
+                            let at = (ioffset + first as u64 * size) as i32;
+                            if base != 0 {
+                                gl.draw_elements_instanced_base_vertex(p.0.topology, count as i32, ty, at, instances as i32, base);
+                            } else {
+                                gl.draw_elements_instanced(p.0.topology, count as i32, ty, at, instances as i32);
+                            }
+                        } else {
+                            let (count, instances, first, first_instance) = (a[0], a[1], a[2], a[3]);
+                            if count == 0 || instances == 0 {
+                                break 'emulated;
+                            }
+                            prepare_draw(gl, shared, st, &p, first_instance);
+                            gl.draw_arrays_instanced(p.0.topology, first as i32, count as i32, instances as i32);
+                        }
+                    }
                 } else {
-                    gl.draw_arrays_indirect_offset(p.0.topology, offset as i32);
+                    prepare_draw(gl, shared, st, &p, 0);
+                    gl.bind_buffer(glow::DRAW_INDIRECT_BUFFER, Some(args.0.raw));
+                    if indexed {
+                        let (_, _, f) = st.index.clone().expect("draw_indexed_indirect without an index buffer");
+                        gl.draw_elements_indirect_offset(p.0.topology, conv::index_type(f).0, offset as i32);
+                    } else {
+                        gl.draw_arrays_indirect_offset(p.0.topology, offset as i32);
+                    }
+                    gl.bind_buffer(glow::DRAW_INDIRECT_BUFFER, None);
                 }
-                gl.bind_buffer(glow::DRAW_INDIRECT_BUFFER, None);
             }
             Cmd::Dispatch(x, y, z) => {
                 let Pipeline::Compute(p) = &st.pipeline else { panic!("dispatch without a pipeline") };
@@ -960,6 +1002,10 @@ unsafe fn attach(gl: &glow::Context, target: u32, attachment: u32, v: &TextureVi
     let tex = v.texture();
     // SAFETY: the caller's.
     unsafe {
+        if let Some(rb) = tex.0.rb {
+            gl.framebuffer_renderbuffer(target, attachment, glow::RENDERBUFFER, Some(rb));
+            return;
+        }
         match tex.0.target {
             glow::TEXTURE_2D | glow::TEXTURE_2D_MULTISAMPLE => gl.framebuffer_texture_2d(target, attachment, tex.0.target, Some(tex.0.raw), v.0.base_mip_level as i32),
             glow::TEXTURE_CUBE_MAP => gl.framebuffer_texture_2d(target, attachment, glow::TEXTURE_CUBE_MAP_POSITIVE_X + v.0.base_array_layer, Some(tex.0.raw), v.0.base_mip_level as i32),
@@ -1357,6 +1403,7 @@ fn zero_range(gl: &glow::Context, shared: &Shared, tex: &Texture, mips: Range<u3
             for mip in mips {
                 for layer in layers.clone() {
                     match tex.0.target {
+                        _ if tex.0.rb.is_some() => gl.framebuffer_renderbuffer(glow::DRAW_FRAMEBUFFER, attachment, glow::RENDERBUFFER, tex.0.rb),
                         glow::TEXTURE_2D | glow::TEXTURE_2D_MULTISAMPLE => gl.framebuffer_texture_2d(glow::DRAW_FRAMEBUFFER, attachment, tex.0.target, Some(tex.0.raw), mip as i32),
                         glow::TEXTURE_CUBE_MAP => gl.framebuffer_texture_2d(glow::DRAW_FRAMEBUFFER, attachment, image_target(tex, layer), Some(tex.0.raw), mip as i32),
                         _ => gl.framebuffer_texture_layer(glow::DRAW_FRAMEBUFFER, attachment, Some(tex.0.raw), mip as i32, layer as i32),

@@ -40,6 +40,9 @@ pub(crate) struct Caps {
     pub combined_texture_units: u32,
     /// `GL_MAX_SAMPLES`.
     pub max_samples: u32,
+    /// Multisampled textures, `glTexStorage2DMultisample` (GL 3.2, ES 3.1). Without them a
+    /// multisampled render target is a renderbuffer (ES 3.0), which shaders cannot sample.
+    pub multisample_textures: bool,
     pub limits: t::Limits,
 }
 
@@ -115,16 +118,38 @@ impl Caps {
                 copy_image: at_least((4, 3), (3, 2)) || has("GL_EXT_copy_image"),
                 indirect: at_least((4, 0), (3, 1)),
                 texture_shadow_lod: has("GL_EXT_texture_shadow_lod"),
-                timestamps: (!es && version >= (3, 3)) || has("GL_EXT_disjoint_timer_query"),
+                // (an ES driver may have the extension for elapsed time alone: ANGLE's counter
+                // for timestamps has no bits, every timestamp read 0)
+                timestamps: ((!es && version >= (3, 3)) || has("GL_EXT_disjoint_timer_query")) && timestamps_count(gl),
                 bc: has("GL_EXT_texture_compression_s3tc") && (has("GL_EXT_texture_compression_bptc") || has("GL_ARB_texture_compression_bptc") || at_least((4, 2), (9, 9))),
                 explicit_bindings: at_least((4, 2), (3, 1)),
                 invalidate: at_least((4, 3), (3, 0)),
                 max_samples: get(glow::MAX_SAMPLES),
+                multisample_textures: at_least((3, 2), (3, 1)),
                 vertex_texture_units: get(glow::MAX_VERTEX_TEXTURE_IMAGE_UNITS),
                 fragment_texture_units: get(glow::MAX_TEXTURE_IMAGE_UNITS),
                 combined_texture_units: get(glow::MAX_COMBINED_TEXTURE_IMAGE_UNITS),
                 limits,
             }
         }
+    }
+}
+
+/// Whether a timestamp query gives a time on this context: one is written and read back.
+///
+/// # Safety
+/// The context is current.
+unsafe fn timestamps_count(gl: &glow::Context) -> bool {
+    // SAFETY: the caller's; a query made, used once and deleted here.
+    unsafe {
+        let Ok(q) = gl.create_query() else { return false };
+        while gl.get_error() != glow::NO_ERROR {}
+        gl.query_counter(q, glow::TIMESTAMP);
+        gl.finish();
+        let mut v = [0u8; 8];
+        gl.get_query_parameter_u64_with_offset(q, glow::QUERY_RESULT, v.as_mut_ptr() as usize);
+        let ok = gl.get_error() == glow::NO_ERROR && u64::from_le_bytes(v) > 0;
+        gl.delete_query(q);
+        ok
     }
 }

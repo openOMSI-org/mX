@@ -225,6 +225,7 @@ pub struct SubmissionIndex(pub u64);
 pub(crate) enum Garbage {
     Buffer(glow::Buffer),
     Texture(glow::Texture),
+    Renderbuffer(glow::Renderbuffer),
     Sampler(glow::Sampler),
     Program(glow::Program),
     Query(glow::Query),
@@ -313,6 +314,7 @@ impl Shared {
                 match g {
                     Garbage::Buffer(b) => gl.delete_buffer(b),
                     Garbage::Texture(t) => gl.delete_texture(t),
+                    Garbage::Renderbuffer(r) => gl.delete_renderbuffer(r),
                     Garbage::Sampler(s) => gl.delete_sampler(s),
                     Garbage::Program(p) => gl.delete_program(p),
                     Garbage::Query(q) => gl.delete_query(q),

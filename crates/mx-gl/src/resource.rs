@@ -206,6 +206,9 @@ impl BufferView {
 pub(crate) struct TextureInner {
     pub raw: glow::Texture,
     pub target: u32,
+    /// A multisampled render target on a context without multisampled textures (ES 3.0): its
+    /// samples live here, and `raw` is a name without storage.
+    pub rb: Option<glow::Renderbuffer>,
     pub size: t::Extent3d,
     pub format: t::TextureFormat,
     pub dimension: t::TextureDimension,
@@ -221,6 +224,9 @@ impl Drop for TextureInner {
     fn drop(&mut self) {
         if !self.external {
             self.shared.retire(Garbage::Texture(self.raw));
+            if let Some(rb) = self.rb {
+                self.shared.retire(Garbage::Renderbuffer(rb));
+            }
         }
     }
 }
@@ -509,8 +515,19 @@ impl Device {
         // from its views; mX decides at creation)
         let cube = desc.view_formats.is_empty() && layers == 6 && desc.size.width == desc.size.height && desc.usage.contains(t::TextureUsages::TEXTURE_BINDING);
         let target = conv::texture_target(desc.dimension, layers, desc.sample_count, cube);
+        // (ES 3.0 has multisampled renderbuffers only: enough for a render target that is
+        // resolved, as MSAA is; ES 3.0 drivers - ANGLE on older chips - drew it black before)
+        let as_renderbuffer = target == glow::TEXTURE_2D_MULTISAMPLE && !shared.caps.multisample_textures;
+        if as_renderbuffer
+            && desc
+                .usage
+                .intersects(t::TextureUsages::TEXTURE_BINDING | t::TextureUsages::STORAGE_BINDING | t::TextureUsages::COPY_SRC | t::TextureUsages::COPY_DST)
+        {
+            return Err(Error::Unsupported("multisampled textures that are sampled or copied (GL 3.2 / OpenGL ES 3.1)".into()));
+        }
         let f = conv::format(desc.format);
         let gl = shared.ctx.lock();
+        let mut rb = None;
         let (w, h) = (desc.size.width as i32, desc.size.height as i32);
         // SAFETY: plain creation and allocation of the texture's storage.
         let raw = unsafe {
@@ -518,6 +535,13 @@ impl Device {
             gl.bind_texture(target, Some(raw));
             let levels = desc.mip_level_count as i32;
             match target {
+                glow::TEXTURE_2D_MULTISAMPLE if as_renderbuffer => {
+                    let r = gl.create_renderbuffer().map_err(|e| gl_err("renderbuffer", e))?;
+                    gl.bind_renderbuffer(glow::RENDERBUFFER, Some(r));
+                    gl.renderbuffer_storage_multisample(glow::RENDERBUFFER, desc.sample_count as i32, f.internal, w, h);
+                    gl.bind_renderbuffer(glow::RENDERBUFFER, None);
+                    rb = Some(r);
+                }
                 glow::TEXTURE_2D_MULTISAMPLE => gl.tex_storage_2d_multisample(target, desc.sample_count as i32, f.internal, w, h, true),
                 glow::TEXTURE_2D | glow::TEXTURE_CUBE_MAP => gl.tex_storage_2d(target, levels, f.internal, w, h),
                 glow::TEXTURE_2D_ARRAY => gl.tex_storage_3d(target, levels, f.internal, w, h, layers as i32),
@@ -541,6 +565,7 @@ impl Device {
         let tex = Texture(Arc::new(TextureInner {
             raw,
             target,
+            rb,
             size: desc.size,
             format: desc.format,
             dimension: desc.dimension,
@@ -563,6 +588,7 @@ impl Device {
         Texture(Arc::new(TextureInner {
             raw,
             target: conv::texture_target(desc.dimension, layers, desc.sample_count, false),
+            rb: None,
             size: desc.size,
             format: desc.format,
             dimension: desc.dimension,
