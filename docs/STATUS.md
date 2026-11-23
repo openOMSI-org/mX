@@ -27,9 +27,10 @@ unless the row says otherwise.
 The no-op backend (`mx-noop`): written and compiled; openOMSI's dedicated server and its
 renderer tests open it.
 
-OpenGL / OpenGL ES (`mx-gl`, the bound tier): written and compiled for macOS, Linux and
-Windows, not yet run on a GPU; its shader lowering and GLSL output are unit-tested, the GLSL
-compiled by `glslangValidator`. See [BOUND_TIER.md](BOUND_TIER.md#status-2026-11-17).
+OpenGL / OpenGL ES (`mx-gl`, the bound tier): the 29 conformance tests pass on ANGLE over
+Metal (OpenGL ES 3.0, the level ANGLE gives older chips; 2026-11-23), compute and the buffer
+heap skipped there for want of ES 3.1. Not yet run on a desktop GL driver or on ANGLE over
+Direct3D 11. See [BOUND_TIER.md](BOUND_TIER.md#status-2026-11-17).
 
 ## Test suites
 
@@ -37,7 +38,7 @@ compiled by `glslangValidator`. See [BOUND_TIER.md](BOUND_TIER.md#status-2026-11
 |-------|--------|
 | Conformance tests, 28 (`crates/mx/tests/conformance.rs`) | pass on Metal (2026-11-17), with and without the residency set and with direct heap textures, under Metal's API and shader validation; pass on MoltenVK (27; the dynamic-offset test is new since) |
 | Pixel parity with wgpu, 7 scenes and 21 of openOMSI's full-screen passes | identical bytes on Metal and on MoltenVK |
-| openOMSI's 27 WGSL modules | compile for every backend; the HLSL has not been through DXC yet |
+| openOMSI's 23 WGSL modules of its mX renderer (`crates/mx/tests/openomsi`, openOMSI 940ab2f97) | compile through DXC (shader model 6.8) on Direct3D 12 (WARP, in CI), on lavapipe and MoltenVK under the Khronos layer with no findings, and on Metal (2026-11-23) |
 | `wgpu-mx` through wgpu's API (`crates/wgpu-mx/tests`) | pass on Metal and MoltenVK |
 | Khronos validation layer with synchronization validation (MoltenVK) | no synchronization findings; two known reports, below (2026-11-17, all 27 tests) |
 | openOMSI's renderer tests on mX's native API (`omsi-render`, 2026-11-17) | 194 on the no-op device and 86 of 90 GPU tests on Metal pass; the 4 others fail the same way on wgpu (see openOMSI's `docs/MX_PORT.md`) |
