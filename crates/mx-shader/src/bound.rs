@@ -35,6 +35,8 @@ pub struct Slot {
     pub index: Index,
     /// Its binding in the heap group ([`slot_binding`]).
     pub binding: u32,
+    /// A read-only buffer view read as a uniform block (see [`views_as_uniforms`]).
+    pub uniform: bool,
 }
 
 /// A module with its heap accesses lowered to slots.
@@ -82,6 +84,7 @@ pub fn lower(m: &Module, mut module: naga::Module, stage: naga::ShaderStage, ent
             heap_binding,
             index,
             binding: slot_binding(n),
+            uniform: false,
         });
         slot_vars.push(h);
         h
@@ -268,6 +271,61 @@ fn unemit(block: &mut naga::Block, replaced: &[Handle<Expression>], exprs: &naga
 
 /// One stage of the bound tier before its source (GLSL, HLSL 5.0): its lowered module and
 /// what it reads.
+/// The buffer slots of `lowered` read as uniform blocks instead of storage buffers: the
+/// read-only views of a fixed size (no runtime-sized array) - a frame's constants, a camera -
+/// for a stage without storage buffers. The backend binds the view's range as a uniform buffer
+/// (its offset aligned for it: GL's buffer view alignment covers both). All or none: when a
+/// view's type breaks the uniform layout rules (an array of scalars, say), they all stay
+/// storage and the stage fails where storage buffers are missing, as before.
+pub fn views_as_uniforms(lowered: &mut Lowered) {
+    let module = &mut lowered.module;
+    let mut changed = Vec::new();
+    for (k, slot) in lowered.slots.iter().enumerate() {
+        if !heap::is_buffer(slot.heap_binding) {
+            continue;
+        }
+        let Some((h, v)) = module
+            .global_variables
+            .iter()
+            .find(|(_, v)| v.binding.is_some_and(|b| b.group == HEAP_GROUP && b.binding == slot.binding))
+        else {
+            continue;
+        };
+        let read_only = matches!(v.space, AddressSpace::Storage { access } if !access.contains(naga::StorageAccess::STORE));
+        if read_only && !runtime_sized(&module.types, v.ty) {
+            changed.push((k, h, v.space));
+        }
+    }
+    if changed.is_empty() {
+        return;
+    }
+    for &(_, h, _) in &changed {
+        module.global_variables[h].space = AddressSpace::Uniform;
+    }
+    match crate::validator().validate(module) {
+        Ok(info) => {
+            lowered.info = info;
+            for &(k, ..) in &changed {
+                lowered.slots[k].uniform = true;
+            }
+        }
+        Err(_) => {
+            for &(_, h, space) in &changed {
+                module.global_variables[h].space = space;
+            }
+        }
+    }
+}
+
+/// Whether type `ty` ends in a runtime-sized array.
+fn runtime_sized(types: &naga::UniqueArena<naga::Type>, ty: Handle<naga::Type>) -> bool {
+    match &types[ty].inner {
+        naga::TypeInner::Array { size: naga::ArraySize::Dynamic, .. } => true,
+        naga::TypeInner::Struct { members, .. } => members.last().is_some_and(|m| runtime_sized(types, m.ty)),
+        _ => false,
+    }
+}
+
 pub struct Stage {
     pub stage: naga::ShaderStage,
     pub entry: String,
@@ -277,9 +335,19 @@ pub struct Stage {
 
 /// Lower the heap of one entry point, with `constants` applied to its `override`s.
 pub fn stage(m: &Module, stage: naga::ShaderStage, entry: Option<&str>, constants: &[(&str, f64)]) -> Result<Stage, ShaderError> {
+    stage_with(m, stage, entry, constants, false)
+}
+
+/// [`stage`]; `uniform_views`: the stage has no storage buffers (OpenGL 3.3 and ES 3.0, most
+/// ES 3.1 fragment stages), so its read-only buffer views are read as uniform blocks where they
+/// can be ([`views_as_uniforms`]).
+pub fn stage_with(m: &Module, stage: naga::ShaderStage, entry: Option<&str>, constants: &[(&str, f64)], uniform_views: bool) -> Result<Stage, ShaderError> {
     let name = m.entry_point(stage, entry)?.name.clone();
     let (module, _) = m.specialize(stage, &name, constants)?;
-    let lowered = lower(m, module, stage, &name)?;
+    let mut lowered = lower(m, module, stage, &name)?;
+    if uniform_views {
+        views_as_uniforms(&mut lowered);
+    }
     Ok(Stage {
         stage,
         roots: m.entry_point_roots(stage, &name)?,

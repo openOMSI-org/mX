@@ -138,7 +138,7 @@ impl Device {
                 }
             }
         } else if stage != ShaderStage::Compute && std::env::var_os("MX_METAL_DIRECT").is_none_or(|v| v != "0") {
-            msl::write_direct(&m.0.module, stage, Some(&name), constants, version, vertex_buffers, false)?
+            msl::write_direct(&m.0.module, stage, Some(&name), constants, version, vertex_buffers, true)?
         } else {
             None
         };

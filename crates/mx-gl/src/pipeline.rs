@@ -326,10 +326,19 @@ impl Device {
         let label = desc.label.unwrap_or("render pipeline");
         let mut stages = vec![(
             desc.vertex.module,
-            glsl::stage(&desc.vertex.module.0.module, ShaderStage::Vertex, desc.vertex.entry_point, desc.vertex.constants)?,
+            glsl::stage_with(
+                &desc.vertex.module.0.module,
+                ShaderStage::Vertex,
+                desc.vertex.entry_point,
+                desc.vertex.constants,
+                self.shared.caps.vertex_storage_blocks == 0,
+            )?,
         )];
         if let Some(f) = &desc.fragment {
-            stages.push((f.module, glsl::stage(&f.module.0.module, ShaderStage::Fragment, f.entry_point, f.constants)?));
+            stages.push((
+                f.module,
+                glsl::stage_with(&f.module.0.module, ShaderStage::Fragment, f.entry_point, f.constants, self.shared.caps.fragment_storage_blocks == 0)?,
+            ));
         }
         let (program, bindings) = self.program(label, &stages)?;
         let vertex_buffers = desc
