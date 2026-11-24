@@ -64,7 +64,7 @@ pub(crate) struct Bindings {
 }
 
 /// A colour target's blend state in GL terms.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Target {
     pub blend: Option<([u32; 2], [u32; 2], [u32; 2])>,
     pub mask: t::ColorWrites,
