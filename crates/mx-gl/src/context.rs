@@ -93,7 +93,37 @@ pub(crate) struct Context {
     pub context: egl::Context,
     pub pbuffer: egl::Surface,
     pub api: Api,
+    /// `OES_draw_buffers_indexed`'s entry points, for ES 3.0 and 3.1 (see [`IndexedOes`]).
+    pub indexed_oes: Option<IndexedOes>,
     pub inner: Mutex<Inner>,
+}
+
+/// Blending and colour masks per draw buffer under `OES_draw_buffers_indexed`'s names. glow
+/// loads only the ES 3.2 names (`glEnablei`), which ANGLE's ES 3.0 refuses although it has the
+/// extension.
+#[derive(Clone, Copy)]
+pub(crate) struct IndexedOes {
+    pub enable: unsafe extern "system" fn(u32, u32),
+    pub disable: unsafe extern "system" fn(u32, u32),
+    pub blend_func_separate: unsafe extern "system" fn(u32, u32, u32, u32, u32),
+    pub blend_equation_separate: unsafe extern "system" fn(u32, u32, u32),
+    pub color_mask: unsafe extern "system" fn(u32, u8, u8, u8, u8),
+}
+
+impl IndexedOes {
+    fn load(e: &Egl) -> Option<IndexedOes> {
+        let f = |name: &str| e.get_proc_address(name);
+        // SAFETY: the extension's entry points have these signatures (OES_draw_buffers_indexed).
+        unsafe {
+            Some(IndexedOes {
+                enable: std::mem::transmute::<extern "system" fn(), unsafe extern "system" fn(u32, u32)>(f("glEnableiOES")?),
+                disable: std::mem::transmute::<extern "system" fn(), unsafe extern "system" fn(u32, u32)>(f("glDisableiOES")?),
+                blend_func_separate: std::mem::transmute::<extern "system" fn(), unsafe extern "system" fn(u32, u32, u32, u32, u32)>(f("glBlendFuncSeparateiOES")?),
+                blend_equation_separate: std::mem::transmute::<extern "system" fn(), unsafe extern "system" fn(u32, u32, u32)>(f("glBlendEquationSeparateiOES")?),
+                color_mask: std::mem::transmute::<extern "system" fn(), unsafe extern "system" fn(u32, u8, u8, u8, u8)>(f("glColorMaskiOES")?),
+            })
+        }
+    }
 }
 
 // SAFETY: the context is only used under `inner`'s lock, made current by the locker.
@@ -238,6 +268,7 @@ impl Context {
             context,
             pbuffer,
             api,
+            indexed_oes: if api == Api::Es { IndexedOes::load(e) } else { None },
             inner: Mutex::new(Inner { gl, surface: None }),
         })
     }
