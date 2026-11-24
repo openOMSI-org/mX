@@ -32,13 +32,19 @@ the same API); shaders get fixed binding slots instead, filled at draw time.
 
 Before writing GLSL, mX rewrites the module:
 
-1. Every access to a heap array, `mx_tex2d[i]`, `mx_samplers[j]`, `mx_buffers[k]` or a
-   typed buffer view, whose index is a member of the immediates (`draw.tex`, as every
+1. Every access to a heap array, `mx_tex2d[i]`, `mx_texdepth_ms[i]`, `mx_samplers[j]`,
+   `mx_buffers[k]`, a typed buffer view or a storage-texture view, whose index is a member of
+   the immediates (`draw.tex`, as every
    bindless shader in mX's guide writes it), becomes a plain global of the element type at a
    slot of its own. The slot remembers where its index is: the byte offset of that member in
    the immediates.
 2. At draw time the backend reads that offset from the immediates the pass set, looks the
    index up in the CPU heap and binds the view, sampler or buffer range to the slot.
+
+Storage textures bind to image units on OpenGL (4.2 / ES 3.1 and later), to UAV slots on
+Direct3D 11 and to texture slots on Metal 2; multisampled depth textures to texture units /
+SRVs / texture slots. Acceleration structures are refused on this tier, in the heap as in root
+groups (the tier has no ray queries).
 
 A shader that indexes the heap with anything else (an index read from a buffer, computed, or
 non-uniform) needs real bindless; creating its pipeline fails on this tier with an error that

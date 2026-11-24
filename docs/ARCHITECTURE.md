@@ -66,8 +66,10 @@ There are no bind group layouts or pipeline layouts. A backend reflects what an 
 uses from the naga module and places each WGSL `(group, binding)` where its API wants it.
 
 - Group 7 is the heap, declared by the prelude that mX appends to every module
-  ([GUIDE.md](GUIDE.md) lists the arrays). It holds texture views, samplers and buffer views;
-  a shader may add its own typed views of the buffers at bindings 16 to 63.
+  ([GUIDE.md](GUIDE.md) lists the arrays). It holds texture views, samplers, buffer views and
+  top-level acceleration structures; a shader may add its own arrays of acceleration
+  structures (binding 11), its own views of the storage textures (bindings 12 to 15) and its
+  own typed views of the buffers (bindings 16 to 63).
 - Groups 0 to 6 are root groups: uniform and storage buffers, storage textures, textures,
   samplers and acceleration structures, set with layout-free bind groups. Native mX code needs
   none of them; they remain for code ported from wgpu (`wgpu-mx`).
@@ -81,7 +83,8 @@ The heap is group 7 rather than 0 so that openOMSI's shaders, which use groups 0
 unchanged.
 
 A texture view gets one index and that index is valid in every typed array the view can be
-read through. A buffer view likewise is one index, valid in `mx_buffers`, `mx_rw_buffers` and
+read through, and in the storage-texture views when it is one (`STORAGE_BINDING`, one mip of a
+2D view). Top-level acceleration structures take their indices from the same space. A buffer view likewise is one index, valid in `mx_buffers`, `mx_rw_buffers` and
 every typed view: they are the same array of buffers seen with different element types. Freed
 indices are reused only after every submission that could read them has completed.
 
@@ -93,8 +96,12 @@ under wgpu.
 
 ### Metal
 
-Three `MTLBuffer`s of 8-byte entries: `MTLResourceID`s of textures, of samplers, and GPU
-addresses (`gpuAddress + offset`) of buffer views. naga writes a `binding_array` of textures as
+Three `MTLBuffer`s of 8-byte entries: `MTLResourceID`s of textures (and of top-level
+acceleration structures, which share their indices), of samplers, and GPU addresses
+(`gpuAddress + offset`) of buffer views. Every texture array, storage-texture view and
+acceleration-structure array reads the first. Encoders declare storage textures in the heap
+for writing, and the heap's acceleration structures with the bottom-level ones of their last
+build, for reading (`useResources`). naga writes a `binding_array` of textures as
 an argument buffer of resource IDs and a `binding_array` of buffers as an argument buffer of
 `device T*`, so the same table serves every typed array of its kind.
 
@@ -131,10 +138,15 @@ because Metal's fixed-function vertex fetch converts normalised formats one ulp 
 ### Vulkan
 
 Descriptor set 0 is the heap: one `UPDATE_AFTER_BIND | PARTIALLY_BOUND` array per texture
-and sampler binding of the prelude, and binding 8, an array of storage buffers. Every buffer
-view a shader declares (`mx_buffers`, `mx_rw_buffers`, its own) is a SPIR-V variable at set 0,
-binding 8: Vulkan lets variables of one descriptor type share a binding. A view is written at its index into every binding its dimension and sample type
-allow, so a 2D depth view goes into `mx_tex2d` and `mx_texdepth`. Root group `g` is descriptor
+and sampler binding of the prelude, binding 9, an array of storage buffers, binding 11, an
+array of acceleration structures (devices with ray queries, which need
+`descriptorBindingAccelerationStructureUpdateAfterBind` for it), and binding 12, an array of
+storage images (`descriptorBindingStorageImageUpdateAfterBind`). Every buffer view a shader
+declares (`mx_buffers`, `mx_rw_buffers`, its own) is a SPIR-V variable at set 0, binding 9, and
+every storage-texture view one at binding 12: Vulkan lets variables of one descriptor type
+share a binding. A view is written at its index into every binding its dimension and sample
+type allow, so a 2D depth view goes into `mx_tex2d` and `mx_texdepth`, a multisampled depth
+view into `mx_texdepth_ms`, a storage view among the storage images. Root group `g` is descriptor
 set `g + 1`, with layouts built from what the pipeline's entry points use, sets allocated per
 encoder and cached per bind group. Immediates are push constants.
 
@@ -147,9 +159,11 @@ so mX keeps the requested size there and says so in the log.
 
 ### Direct3D 12
 
-One shader-visible CBV/SRV/UAV heap whose first `T` descriptors are the texture slots, then the
-heap group's sampler index buffer, then `B` raw SRVs and `B` raw UAVs of the buffer slots (a
-read-only view's UAV is a null descriptor), then the ring of root tables; and a shader-visible
+One shader-visible CBV/SRV/UAV heap whose first `T` descriptors are the texture slots (SRVs of
+texture views and of top-level acceleration structures), then the heap group's sampler index
+buffer, then `B` raw SRVs and `B` raw UAVs of the buffer slots (a read-only view's UAV is a null
+descriptor), then `T` UAVs of the texture slots (storage-texture views), then the ring of root
+tables; and a shader-visible
 sampler heap of 2048. Every root signature has a table over the texture slots
 with one SRV range per typed array, all starting at descriptor 0 so the indices are shared.
 The ranges are `T` long because naga's HLSL writer needs a size for a binding array. Samplers
@@ -157,11 +171,16 @@ go through naga's sampler heap and per-group sampler index buffers, the way wgpu
 them. Root group `g` is a descriptor table whose descriptors are copied per draw into a ring
 in the same heap; immediates are root constants. Each buffer view a pipeline's stages use is
 one more range of the heap table: `ByteAddressBuffer`s over the SRVs or `RWByteAddressBuffer`s
-over the UAVs, `B` long, in a space of its own. `mx_shader::hlsl` has the register layout.
+over the UAVs, `B` long, in a space of its own; so is each storage-texture view
+(`RWTexture2D`s over the texture slots' UAVs) and the acceleration-structure array
+(`RaytracingAccelerationStructure`s over the texture slots). A draw or dispatch whose pipeline
+writes storage textures through the heap puts every texture with a storage view in the heap in
+`UNORDERED_ACCESS` first; the next operation that does not returns them home.
+`mx_shader::hlsl` has the register layout.
 
-naga's HLSL writer did not support `binding_array`s of storage buffers. mX uses naga 30.0.2
-with that added (`vendor/naga`, see its `MX_PATCHES.md`); shaders without them compile exactly
-as with the published crate.
+naga's HLSL writer did not support `binding_array`s of storage buffers, nor its validator
+binding arrays of acceleration structures. mX uses naga 30.0.2 with those added (`vendor/naga`,
+see its `MX_PATCHES.md`); shaders without them compile exactly as with the published crate.
 
 ## Shader compilation
 
