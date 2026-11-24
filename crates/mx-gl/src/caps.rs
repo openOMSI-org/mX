@@ -43,6 +43,9 @@ pub(crate) struct Caps {
     /// Multisampled textures, `glTexStorage2DMultisample` (GL 3.2, ES 3.1). Without them a
     /// multisampled render target is a renderbuffer (ES 3.0), which shaders cannot sample.
     pub multisample_textures: bool,
+    /// Blend state and colour masks per draw buffer, `glEnablei` / `glBlendFunci` (GL 4.0, ES
+    /// 3.2 or `OES_draw_buffers_indexed`). Without them every target takes the first's.
+    pub indexed_draw_buffers: bool,
     pub limits: t::Limits,
 }
 
@@ -132,6 +135,7 @@ impl Caps {
                 invalidate: at_least((4, 3), (3, 0)),
                 max_samples: get(glow::MAX_SAMPLES),
                 multisample_textures: at_least((3, 2), (3, 1)),
+                indexed_draw_buffers: at_least((4, 0), (3, 2)) || has("GL_OES_draw_buffers_indexed") || has("GL_EXT_draw_buffers_indexed"),
                 vertex_texture_units: get(glow::MAX_VERTEX_TEXTURE_IMAGE_UNITS),
                 fragment_texture_units: get(glow::MAX_TEXTURE_IMAGE_UNITS),
                 combined_texture_units: get(glow::MAX_COMBINED_TEXTURE_IMAGE_UNITS),
