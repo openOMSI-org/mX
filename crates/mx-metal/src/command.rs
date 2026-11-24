@@ -548,7 +548,14 @@ fn bind_direct(b: &impl StageBinder, stage: &StageInfo, state: &PassState, heap:
                     b.buffer(slot, buffer, offset);
                 }
             }
-            _ => {}
+            RootSlot::AccelerationStructure(slot) => {
+                if let Some(tlas) = heap.tlas_at(index) {
+                    b.accel(slot, &tlas.raw);
+                    let built = tlas.built_with.lock().clone();
+                    let list: Vec<NonNull<ProtocolObject<dyn MTLResource>>> = built.iter().map(|x| NonNull::from(ProtocolObject::<dyn MTLResource>::from_ref(&*x.0.raw.0))).collect();
+                    b.use_read(&list);
+                }
+            }
         }
     }
 }

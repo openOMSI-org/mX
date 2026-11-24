@@ -1332,3 +1332,10 @@ impl<A> TlasInstance<A> {
         TlasInstance { blas, transform, custom_data, mask }
     }
 }
+
+/// Whether a texture view takes a place among the heap's storage textures
+/// (`binding_array<texture_storage_2d<F, write>>`, heap bindings 12 to 15): one mip of a 2D
+/// view of a texture made with `STORAGE_BINDING`, in a format shaders can write.
+pub fn is_heap_storage_view(usage: TextureUsages, format: TextureFormat, dimension: TextureViewDimension, mip_level_count: u32) -> bool {
+    usage.contains(TextureUsages::STORAGE_BINDING) && dimension == TextureViewDimension::D2 && mip_level_count == 1 && !format.has_depth() && !format.is_compressed() && !format.is_srgb()
+}

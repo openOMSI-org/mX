@@ -1,6 +1,8 @@
 //! The bindless heap: descriptor set 0, one `UPDATE_AFTER_BIND | PARTIALLY_BOUND` array per
-//! texture and sampler binding of the heap and one array of storage buffers that every buffer
-//! view of a shader aliases, slot allocation with deferred reuse.
+//! texture and sampler binding of the heap, one array of storage buffers that every buffer
+//! view of a shader aliases, one array of storage images that every storage-texture view
+//! aliases and one of acceleration structures (where the device has them), slot allocation
+//! with deferred reuse. Storage images and acceleration structures share the texture slots.
 
 use ash::vk;
 use mx_shader::heap;
@@ -58,10 +60,27 @@ pub(crate) struct Heap {
     buffers: Slots,
     in_use: usize,
     buffers_in_use: usize,
+    /// The set has the storage images (`heap::FIRST_STORAGE_TEXTURE`).
+    pub storage_images: bool,
+    /// The set has the acceleration structures (`heap::ACCELERATION_STRUCTURES`).
+    pub acceleration_structures: bool,
 }
 
-/// The descriptor bindings of the heap's set: textures, samplers, then the buffers.
-const SET_BINDINGS: u32 = heap::BUFFERS + 1;
+/// The descriptor bindings of the heap's set and their types: textures, samplers, the buffers,
+/// then the storage images and acceleration structures where the device has them.
+fn set_bindings(storage_images: bool, acceleration_structures: bool) -> Vec<(u32, vk::DescriptorType)> {
+    let mut b: Vec<(u32, vk::DescriptorType)> = (0..heap::SAMPLERS).map(|b| (b, vk::DescriptorType::SAMPLED_IMAGE)).collect();
+    b.push((heap::SAMPLERS, vk::DescriptorType::SAMPLER));
+    b.push((heap::SAMPLERS_CMP, vk::DescriptorType::SAMPLER));
+    b.push((heap::BUFFERS, vk::DescriptorType::STORAGE_BUFFER));
+    if acceleration_structures {
+        b.push((heap::ACCELERATION_STRUCTURES, vk::DescriptorType::ACCELERATION_STRUCTURE_KHR));
+    }
+    if storage_images {
+        b.push((heap::FIRST_STORAGE_TEXTURE, vk::DescriptorType::STORAGE_IMAGE));
+    }
+    b
+}
 
 impl Heap {
     /// The heap with up to `textures` / `samplers` / `buffers` slots: fewer where the driver says a
@@ -69,20 +88,29 @@ impl Heap {
     /// where `vkGetDescriptorSetLayoutSupport` says so). `portability`: MoltenVK, whose answer
     /// only compares with its `maxPerSetDescriptors` (1212) although its argument buffers
     /// take far larger arrays: the size asked for is kept there.
-    pub fn new(device: &ash::Device, textures: u32, samplers: u32, buffers: u32, update_unused_while_pending: bool, portability: bool) -> Result<Heap> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        device: &ash::Device,
+        textures: u32,
+        samplers: u32,
+        buffers: u32,
+        update_unused_while_pending: bool,
+        portability: bool,
+        storage_images: bool,
+        acceleration_structures: bool,
+    ) -> Result<Heap> {
         let mut flags = vk::DescriptorBindingFlags::PARTIALLY_BOUND | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND;
         if update_unused_while_pending {
             flags |= vk::DescriptorBindingFlags::UPDATE_UNUSED_WHILE_PENDING;
         }
+        let set = set_bindings(storage_images, acceleration_structures);
         let bindings_for = |textures: u32, samplers: u32, buffers: u32| -> Vec<vk::DescriptorSetLayoutBinding<'static>> {
-            (0..SET_BINDINGS)
-                .map(|b| {
-                    let (ty, count) = if heap::is_texture(b) {
-                        (vk::DescriptorType::SAMPLED_IMAGE, textures)
-                    } else if heap::is_sampler(b) {
-                        (vk::DescriptorType::SAMPLER, samplers)
-                    } else {
-                        (vk::DescriptorType::STORAGE_BUFFER, buffers)
+            set.iter()
+                .map(|&(b, ty)| {
+                    let count = match ty {
+                        vk::DescriptorType::SAMPLER => samplers,
+                        vk::DescriptorType::STORAGE_BUFFER => buffers,
+                        _ => textures,
                     };
                     vk::DescriptorSetLayoutBinding::default()
                         .binding(b)
@@ -92,7 +120,7 @@ impl Heap {
                 })
                 .collect()
         };
-        let binding_flags = vec![flags; SET_BINDINGS as usize];
+        let binding_flags = vec![flags; set.len()];
         let supported = |textures: u32, samplers: u32, buffers: u32| -> bool {
             let bindings = bindings_for(textures, samplers, buffers);
             let mut flags_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::default().binding_flags(&binding_flags);
@@ -128,8 +156,7 @@ impl Heap {
             .bindings(&bindings)
             .push_next(&mut flags_info);
         let tex_bindings = heap::SAMPLERS;
-        debug_assert_eq!((heap::SAMPLERS_CMP, heap::BUFFERS), (heap::SAMPLERS + 1, heap::SAMPLERS + 2));
-        let sizes = [
+        let mut sizes = vec![
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::SAMPLED_IMAGE,
                 descriptor_count: textures * tex_bindings,
@@ -143,6 +170,18 @@ impl Heap {
                 descriptor_count: buffers,
             },
         ];
+        if storage_images {
+            sizes.push(vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_IMAGE,
+                descriptor_count: textures,
+            });
+        }
+        if acceleration_structures {
+            sizes.push(vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+                descriptor_count: textures,
+            });
+        }
         // SAFETY: plain creation of the heap's layout, pool and set.
         unsafe {
             let layout = device.create_descriptor_set_layout(&info, None).map_err(|e| vk_err("heap layout", e))?;
@@ -168,6 +207,8 @@ impl Heap {
                 buffers: Slots::new(buffers),
                 in_use: 0,
                 buffers_in_use: 0,
+                storage_images,
+                acceleration_structures,
             })
         }
     }
@@ -178,11 +219,11 @@ impl Heap {
     }
 
     /// Put a view in the heap: written into every heap binding in `bindings` (bit per
-    /// `heap::*`) at its slot.
-    pub fn add_texture(&mut self, device: &ash::Device, view: vk::ImageView, bindings: u32) -> Result<u32> {
+    /// `heap::*`) at its slot, and among the storage images when `storage`.
+    pub fn add_texture(&mut self, device: &ash::Device, view: vk::ImageView, bindings: u32, storage: bool) -> Result<u32> {
         let slot = self.textures.alloc("textures")?;
         let info = [vk::DescriptorImageInfo::default().image_view(view).image_layout(vk::ImageLayout::GENERAL)];
-        let writes: Vec<vk::WriteDescriptorSet> = (0..heap::SAMPLERS)
+        let mut writes: Vec<vk::WriteDescriptorSet> = (0..heap::SAMPLERS)
             .filter(|b| bindings & (1 << b) != 0)
             .map(|b| {
                 vk::WriteDescriptorSet::default()
@@ -193,6 +234,16 @@ impl Heap {
                     .image_info(&info)
             })
             .collect();
+        if storage && self.storage_images {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.set)
+                    .dst_binding(heap::FIRST_STORAGE_TEXTURE)
+                    .dst_array_element(slot)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .image_info(&info),
+            );
+        }
         // SAFETY: the slot is not read by any pending work (fresh, or past its deferred
         // release); the heap lock serialises updates of the set.
         unsafe { device.update_descriptor_sets(&writes, &[]) };
@@ -204,6 +255,35 @@ impl Heap {
     pub fn remove_texture(&mut self, slot: u32, after: u64) {
         self.textures.deferred.push((after, slot));
         self.in_use -= 1;
+    }
+
+    /// Put a top-level acceleration structure in the heap, at a texture slot.
+    /// (A dropped structure's destruction waits for the GPU anyway, `Shared::retire`.)
+    pub fn add_tlas(&mut self, device: &ash::Device, tlas: vk::AccelerationStructureKHR) -> Result<u32> {
+        if !self.acceleration_structures {
+            return Err(Error::Unsupported(
+                "acceleration structures in the bindless heap (descriptorBindingAccelerationStructureUpdateAfterBind)".into(),
+            ));
+        }
+        let slot = self.textures.alloc("textures")?;
+        let structures = [tlas];
+        let mut info = vk::WriteDescriptorSetAccelerationStructureKHR::default().acceleration_structures(&structures);
+        let mut write = vk::WriteDescriptorSet::default()
+            .dst_set(self.set)
+            .dst_binding(heap::ACCELERATION_STRUCTURES)
+            .dst_array_element(slot)
+            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            .push_next(&mut info);
+        write.descriptor_count = 1;
+        // SAFETY: as in `add_texture`.
+        unsafe { device.update_descriptor_sets(&[write], &[]) };
+        Ok(slot)
+    }
+
+    /// Take a top-level structure out of the heap. Its slot is reused once submission
+    /// `after` is done.
+    pub fn remove_tlas(&mut self, slot: u32, after: u64) {
+        self.textures.deferred.push((after, slot));
     }
 
     pub fn add_sampler(&mut self, device: &ash::Device, sampler: vk::Sampler, compare: bool) -> Result<u32> {
@@ -274,7 +354,8 @@ impl Heap {
 pub(crate) fn bindings_for(dimension: mx_types::TextureViewDimension, format: mx_types::TextureFormat, aspect: mx_types::TextureAspect, samples: u32) -> u32 {
     use mx_types::{TextureSampleType as S, TextureViewDimension as D};
     if samples > 1 {
-        return 0;
+        let depth = format.has_depth() && aspect != mx_types::TextureAspect::StencilOnly;
+        return if depth && dimension == D::D2 { 1 << heap::TEX_DEPTH_MS } else { 0 };
     }
     let sample = if format.has_depth() && aspect == mx_types::TextureAspect::StencilOnly {
         S::Uint

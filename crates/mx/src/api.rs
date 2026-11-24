@@ -522,8 +522,23 @@ impl Device {
     }
     pub fn create_tlas(&self, desc: &t::CreateTlasDescriptor<'_>) -> Result<Tlas> {
         let raw = wrap_res!(Device, TlasRaw, self, d => d.create_tlas(desc))?;
+        let index = match &raw {
+            #[cfg(target_vendor = "apple")]
+            TlasRaw::Metal(t) => t.index(),
+            #[cfg(windows)]
+            TlasRaw::Dx12(t) => t.index(),
+            #[cfg(feature = "vulkan")]
+            TlasRaw::Vulkan(t) => t.index(),
+            #[cfg(feature = "gl")]
+            TlasRaw::Gl(t) => t.index(),
+            #[cfg(windows)]
+            TlasRaw::Dx11(t) => t.index(),
+            #[cfg(feature = "noop")]
+            TlasRaw::Noop(t) => t.index(),
+        };
         Ok(Tlas {
             raw: Mutex::new(raw),
+            index,
             instances: vec![None; desc.max_instances as usize],
         })
     }
@@ -880,12 +895,21 @@ pub(crate) enum TlasRaw {
 /// (`tlas[i] = Some(instance)`), and handed to the backend when it is built.
 pub struct Tlas {
     pub(crate) raw: Mutex<TlasRaw>,
+    index: u32,
     instances: Vec<Option<crate::TlasInstance>>,
 }
 
 impl Tlas {
     pub fn max_instances(&self) -> u32 {
         self.instances.len() as u32
+    }
+
+    /// The structure's index in the bindless heap, for ray queries through
+    /// `@group(7) @binding(11) var mx_tlas: binding_array<acceleration_structure>;`
+    /// (`mx_tlas[i]`). It shares the index space of texture views; it is valid until the
+    /// structure is dropped, and reads what its last build made.
+    pub fn index(&self) -> u32 {
+        self.index
     }
 
     pub(crate) fn lock_for(&self, backend: t::Backend) -> parking_lot::MutexGuard<'_, TlasRaw> {

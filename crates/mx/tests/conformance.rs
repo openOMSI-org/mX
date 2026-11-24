@@ -1268,7 +1268,12 @@ fn compressed_small_mips_take_whole_blocks() {
 
 /// Read `w`×`h` texels of 4 bytes from mip `level`, layer `layer` of `t`.
 fn read_texels(g: &Gpu, t: &Texture, level: u32, layer: u32, w: u32, h: u32) -> Vec<u8> {
-    let row = (w * 4).div_ceil(256) * 256;
+    read_texels_of(g, t, level, layer, w, h, 4)
+}
+
+/// [`read_texels`] of a format of `bpp` bytes a texel.
+fn read_texels_of(g: &Gpu, t: &Texture, level: u32, layer: u32, w: u32, h: u32, bpp: u32) -> Vec<u8> {
+    let row = (w * bpp).div_ceil(256) * 256;
     let rb = g
         .device
         .create_buffer(&BufferDescriptor {
@@ -1302,7 +1307,7 @@ fn read_texels(g: &Gpu, t: &Texture, level: u32, layer: u32, w: u32, h: u32) -> 
     let i = g.queue.submit([enc.finish()]);
     g.device.wait(i).unwrap();
     rb.map_read(0..rb.size(), |b| {
-        (0..h as usize).flat_map(|y| b[y * row as usize..y * row as usize + (w * 4) as usize].to_vec()).collect()
+        (0..h as usize).flat_map(|y| b[y * row as usize..y * row as usize + (w * bpp) as usize].to_vec()).collect()
     })
     .unwrap()
 }
@@ -2231,4 +2236,298 @@ fn a_surface_answers_whether_an_adapter_can_present_to_it() {
     });
     let supported = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("is_supported_by did not return");
     assert!(supported, "the noop adapter can present to a noop surface");
+}
+
+/// A multisampled depth texture read through the heap (`mx_texdepth_ms`) by an index from the
+/// immediates, one sample at a time: each pixel's 4 samples, averaged.
+#[test]
+fn multisampled_depth_is_read_through_the_heap() {
+    let g = gpu();
+    let depth = match g.device.create_texture(&TextureDescriptor {
+        label: Some("msaa depth"),
+        size: Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 4,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Depth32Float,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    }) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("skipped: {e}");
+            return;
+        }
+    };
+    let dv = depth.create_view(&Default::default()).unwrap();
+    // the lower left half at depth 0.25, the rest cleared to 1
+    let tri = g.shader(
+        "@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0));
+    return vec4<f32>(p[i], 0.25, 1.0);
+}",
+    );
+    let depth_pipeline = g
+        .device
+        .create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("depth"),
+            vertex: VertexState {
+                module: &tri,
+                entry_point: None,
+                constants: &[],
+                buffers: &[],
+            },
+            primitive: PrimitiveState::default(),
+            depth_stencil: Some(DepthStencilState {
+                format: TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: CompareFunction::Always,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: MultisampleState { count: 4, ..Default::default() },
+            fragment: None,
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    let m = g.shader(&format!(
+        "{FULLSCREEN_VS}
+struct Draw {{ pad: u32, depth: u32 }}
+var<immediate> draw: Draw;
+@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {{
+    var z = 0.0;
+    for (var s = 0; s < 4; s++) {{ z += textureLoad(mx_texdepth_ms[draw.depth], vec2<i32>(p.xy), s); }}
+    return vec4<f32>(z / 4.0, 0.0, 0.0, 1.0);
+}}"
+    ));
+    let p = g.pipeline(&m, TextureFormat::Rgba8Unorm, &[], None, &[]);
+    let (t, v) = g.target(TextureFormat::Rgba8Unorm);
+    let mut enc = g.device.create_command_encoder(None);
+    {
+        let mut rp = enc.begin_render_pass(&RenderPassDescriptor {
+            label: Some("depth"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
+                view: &dv,
+                depth_ops: Some(Operations {
+                    load: LoadOp::Clear(1.0),
+                    store: StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        rp.set_pipeline(&depth_pipeline);
+        rp.draw(0..3, 0..1);
+    }
+    {
+        let mut rp = pass(&mut enc, &v, Color::BLACK);
+        rp.set_pipeline(&p);
+        rp.set_immediates(0, bytemuck::cast_slice(&[0u32, dv.index()]));
+        rp.draw(0..3, 0..1);
+    }
+    let px = g.read(enc, &t);
+    let at = |x: u32, y: u32| px[(y * W + x) as usize][0];
+    assert_eq!(at(1, H - 2), 64, "inside: depth 0.25");
+    assert_eq!(at(W - 2, 1), 255, "outside: depth 1");
+    let edge = (0..W).map(|x| at(x, x)).filter(|r| *r > 64 && *r < 255).count();
+    assert!(edge > W as usize / 2, "only {edge} pixels on the diagonal read samples of both depths");
+}
+
+/// `f16` bits to `f32` (normal numbers and zero).
+fn f16_to_f32(h: u16) -> f32 {
+    let (sign, exp, man) = ((h >> 15) as u32, ((h >> 10) & 0x1f) as u32, (h & 0x3ff) as u32);
+    if exp == 0 && man == 0 {
+        return f32::from_bits(sign << 31);
+    }
+    f32::from_bits(sign << 31 | (exp + 112) << 23 | man << 13)
+}
+
+/// A compute pass writes two storage textures of different formats through the heap
+/// (`binding_array<texture_storage_2d<F, write>>`, indices from the immediates); one of them
+/// is a storage texture only, the other is then sampled through `mx_tex2d` at the same index.
+#[test]
+fn compute_writes_storage_textures_through_the_heap() {
+    if lacks_compute() {
+        return;
+    }
+    let g = gpu();
+    const N: u32 = 16;
+    let half = texture(&g, N, 1, 1, TextureFormat::Rgba16Float, TextureUsages::STORAGE_BINDING | TextureUsages::COPY_SRC);
+    let bytes = texture(
+        &g,
+        N,
+        1,
+        1,
+        TextureFormat::Rgba8Unorm,
+        TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC,
+    );
+    let hv = half.create_view(&Default::default()).unwrap();
+    let bv = bytes.create_view(&Default::default()).unwrap();
+    assert_ne!(hv.index(), bv.index());
+    let m = g.shader(
+        "@group(7) @binding(12) var out16: binding_array<texture_storage_2d<rgba16float, write>>;
+@group(7) @binding(13) var out8: binding_array<texture_storage_2d<rgba8unorm, write>>;
+struct Draw { half: u32, bytes: u32 }
+var<immediate> draw: Draw;
+@compute @workgroup_size(8, 8) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    textureStore(out16[draw.half], vec2<i32>(id.xy), vec4<f32>(f32(id.x), f32(id.y), 0.5, 1.0));
+    textureStore(out8[draw.bytes], vec2<i32>(id.xy), vec4<f32>(f32(id.x) / 15.0, 0.0, 1.0, 1.0));
+}",
+    );
+    let cp_pipeline = g
+        .device
+        .create_compute_pipeline(&ComputePipelineDescriptor {
+            label: Some("storage"),
+            module: &m,
+            entry_point: None,
+            constants: &[],
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    let show = g.shader(&format!(
+        "{FULLSCREEN_VS}
+struct Draw {{ tex: u32 }}
+var<immediate> draw: Draw;
+@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {{ return textureLoad(mx_tex2d[draw.tex], vec2<i32>(p.xy) / 4, 0); }}"
+    ));
+    let show = g.pipeline(&show, TextureFormat::Rgba8Unorm, &[], None, &[]);
+    let (t, v) = g.target(TextureFormat::Rgba8Unorm);
+    let mut enc = g.device.create_command_encoder(None);
+    {
+        let mut cp = enc.begin_compute_pass(&Default::default());
+        cp.set_pipeline(&cp_pipeline);
+        cp.set_immediates(0, bytemuck::cast_slice(&[hv.index(), bv.index()]));
+        cp.dispatch_workgroups(N / 8, N / 8, 1);
+    }
+    {
+        let mut rp = pass(&mut enc, &v, Color::BLACK);
+        rp.set_pipeline(&show);
+        rp.set_immediates(0, bytemuck::cast_slice(&[bv.index()]));
+        rp.draw(0..3, 0..1);
+    }
+    let shown = g.read(enc, &t);
+    for x in [0, 5, 15] {
+        let want = [17 * x as u8, 0, 255, 255];
+        assert_eq!(shown[(9 * 4 * W + x * 4 + 1) as usize], want, "sampled after the dispatch, x = {x}");
+    }
+    let b = read_texels(&g, &bytes, 0, 0, N, N);
+    assert_eq!(&b[(3 * N + 15) as usize * 4..][..4], [255, 0, 255, 255]);
+    // the half-float texture: 8 bytes a texel
+    let h = read_texels_of(&g, &half, 0, 0, N, N, 8);
+    let texel = |x: u32, y: u32| -> [f32; 4] {
+        let at = ((y * N + x) * 8) as usize;
+        std::array::from_fn(|c| f16_to_f32(u16::from_le_bytes([h[at + c * 2], h[at + c * 2 + 1]])))
+    };
+    assert_eq!(texel(0, 0), [0.0, 0.0, 0.5, 1.0]);
+    assert_eq!(texel(7, 12), [7.0, 12.0, 0.5, 1.0]);
+    assert_eq!(texel(15, 15), [15.0, 15.0, 0.5, 1.0]);
+}
+
+/// Ray queries against a top-level structure read from the heap by its index
+/// (`Tlas::index`), with the results written to a heap buffer: no bind groups.
+#[test]
+fn ray_queries_read_acceleration_structures_from_the_heap() {
+    let adapter = Instance::new().default_adapter().unwrap();
+    if !adapter.supports_ray_query() {
+        eprintln!("skipped: no ray queries on this GPU");
+        return;
+    }
+    let g = gpu();
+    let verts: [f32; 9] = [-1.0, -1.0, 0.0, 1.0, -1.0, 0.0, 0.0, 1.0, 0.0];
+    let vb = buffer(&g, bytemuck::cast_slice(&verts), BufferUsages::BLAS_INPUT);
+    let size = BlasTriangleGeometrySizeDescriptor {
+        vertex_format: VertexFormat::Float32x3,
+        vertex_count: 3,
+        index_format: None,
+        index_count: None,
+        flags: AccelerationStructureGeometryFlags::OPAQUE,
+    };
+    let blas = g.device.create_blas(&Default::default(), &[size]).unwrap();
+    let tlas_desc = CreateTlasDescriptor {
+        label: None,
+        max_instances: 1,
+        flags: AccelerationStructureFlags::PREFER_FAST_TRACE,
+        update_mode: Default::default(),
+    };
+    // two structures: the triangle at x = 0, and at x = 10
+    let mut near = g.device.create_tlas(&tlas_desc).unwrap();
+    let mut far = g.device.create_tlas(&tlas_desc).unwrap();
+    near[0] = Some(TlasInstance::new(blas.clone(), [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], 7, 0xFF));
+    far[0] = Some(TlasInstance::new(blas.clone(), [1.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0], 9, 0xFF));
+    assert_ne!(near.index(), far.index());
+    // (the structures share the index space of texture views)
+    let (_t, tv) = g.solid([0, 0, 0, 255]);
+    assert!(tv.index() != near.index() && tv.index() != far.index());
+    let m = g.shader(
+        "enable wgpu_ray_query;
+@group(7) @binding(11) var mx_tlas: binding_array<acceleration_structure>;
+struct Draw { tlas: u32, out: u32, base: u32 }
+var<immediate> draw: Draw;
+@compute @workgroup_size(2) fn main(@builtin(local_invocation_index) i: u32) {
+    let x = array<f32, 2>(0.0, 10.0)[i];
+    var rq: ray_query;
+    rayQueryInitialize(&rq, mx_tlas[draw.tlas], RayDesc(0u, 0xFFu, 0.0, 100.0, vec3<f32>(x, 0.0, -1.0), vec3<f32>(0.0, 0.0, 1.0)));
+    rayQueryProceed(&rq);
+    let hit = rayQueryGetCommittedIntersection(&rq);
+    var r = 0xFFFFFFFFu;
+    if (hit.kind == RAY_QUERY_INTERSECTION_TRIANGLE) { r = hit.instance_custom_data; }
+    mx_rw_buffers[draw.out].w[draw.base + i] = r;
+}",
+    );
+    let p = g
+        .device
+        .create_compute_pipeline(&ComputePipelineDescriptor {
+            label: None,
+            module: &m,
+            entry_point: None,
+            constants: &[],
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+    let out = g
+        .device
+        .create_buffer(&BufferDescriptor {
+            label: None,
+            size: 16,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        })
+        .unwrap();
+    let ov = out.create_view(&BufferViewDescriptor { writable: true, ..Default::default() }).unwrap();
+    let rb = g
+        .device
+        .create_buffer(&BufferDescriptor {
+            label: None,
+            size: 16,
+            usage: BufferUsages::MAP_READ | BufferUsages::COPY_DST,
+        })
+        .unwrap();
+    let mut enc = g.device.create_command_encoder(None);
+    let entry = BlasBuildEntry {
+        blas: &blas,
+        geometry: vec![BlasTriangleGeometry {
+            size: &size,
+            vertex_buffer: &vb,
+            first_vertex: 0,
+            vertex_stride: 12,
+            index_buffer: None,
+            first_index: None,
+        }],
+    };
+    enc.build_acceleration_structures([&entry], [&near, &far]);
+    {
+        let mut cp = enc.begin_compute_pass(&Default::default());
+        cp.set_pipeline(&p);
+        for (k, tlas) in [&near, &far].into_iter().enumerate() {
+            cp.set_immediates(0, bytemuck::cast_slice(&[tlas.index(), ov.index(), 2 * k as u32]));
+            cp.dispatch_workgroups(1, 1, 1);
+        }
+    }
+    enc.copy_buffer_to_buffer(&out, 0, &rb, 0, 16);
+    let i = g.queue.submit([enc.finish()]);
+    g.device.wait(i).unwrap();
+    let got: Vec<u32> = rb.map_read(0..16, |b| bytemuck::cast_slice(b).to_vec()).unwrap();
+    assert_eq!(got, [7, u32::MAX, u32::MAX, 9]);
 }

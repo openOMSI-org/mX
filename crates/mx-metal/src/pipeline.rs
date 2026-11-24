@@ -132,6 +132,9 @@ impl Device {
         let heap = m.0.module.entry_point_heap(stage, &name)? != 0;
         let direct = if bound && heap {
             match msl::write_lowered(&m.0.module, stage, Some(&name), constants, version, vertex_buffers, true)? {
+                Ok(d) if d.2.iter().any(|s| mx_shader::heap::is_acceleration_structure(s.slot.heap_binding)) => {
+                    return Err(Error::Unsupported(format!("{} ({stage:?} `{name}`): ray queries on a Metal 2 GPU (the bound tier)", m.0.module.label)));
+                }
                 Ok(d) => Some(d),
                 Err(why) => {
                     return Err(Error::Unsupported(format!("{} ({stage:?} `{name}`) needs bindless (Metal 3) on this GPU: {why}", m.0.module.label)));

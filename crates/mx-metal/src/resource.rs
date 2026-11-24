@@ -226,7 +226,8 @@ impl Texture {
         self.0.usage
     }
 
-    /// A view. With `TEXTURE_BINDING` usage it gets a bindless index ([`TextureView::index`]).
+    /// A view. With `TEXTURE_BINDING` usage, or as a storage texture (`STORAGE_BINDING`, one mip
+    /// of a 2D view), it gets a bindless index ([`TextureView::index`]).
     pub fn create_view(&self, desc: &t::TextureViewDescriptor<'_>) -> Result<TextureView> {
         let tex = &self.0;
         let format = desc.format.unwrap_or(tex.format);
@@ -251,9 +252,11 @@ impl Texture {
         if let Some(l) = desc.label {
             raw.setLabel(Some(&crate::ns(l)));
         }
-        let slot = if tex.usage.contains(t::TextureUsages::TEXTURE_BINDING) && !(format.has_stencil() && desc.aspect == t::TextureAspect::All) {
+        let sampled = tex.usage.contains(t::TextureUsages::TEXTURE_BINDING) && !(format.has_stencil() && desc.aspect == t::TextureAspect::All);
+        let storage = t::is_heap_storage_view(tex.usage, format, dimension, mip_count);
+        let slot = if sampled || storage {
             let hot = tex.external || tex.usage.intersects(t::TextureUsages::RENDER_ATTACHMENT | t::TextureUsages::STORAGE_BINDING);
-            Some(tex.shared.heap.lock().add_texture(&raw, self.owner_id(), hot)?)
+            Some(tex.shared.heap.lock().add_texture(&raw, self.owner_id(), hot, storage)?)
         } else {
             None
         };

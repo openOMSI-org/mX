@@ -12,6 +12,9 @@ pub(crate) struct TextureSlot {
     pub mip_count: u32,
     /// For depth-stencil textures: which aspect is sampled (`DEPTH_STENCIL_TEXTURE_MODE`).
     pub depth_stencil_mode: Option<u32>,
+    /// A storage texture's image binding: its internal format and layer (GL 4.2 / ES 3.1
+    /// image units), for the heap's storage-texture views.
+    pub image: Option<(u32, u32)>,
 }
 
 #[derive(Clone, Copy, Debug)]

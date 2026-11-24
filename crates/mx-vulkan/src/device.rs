@@ -234,6 +234,12 @@ pub(crate) struct Caps {
     pub f12_ubo_std_layout: bool,
     pub max_storage_buffer_range: u64,
     pub update_unused_while_pending: bool,
+    /// Storage images in the heap (`descriptorBindingStorageImageUpdateAfterBind`).
+    pub heap_storage_images: bool,
+    /// `shaderStorageImageArrayNonUniformIndexing`.
+    pub storage_image_non_uniform: bool,
+    /// Acceleration structures in the heap (`descriptorBindingAccelerationStructureUpdateAfterBind`).
+    pub heap_acceleration_structures: bool,
     pub limits: t::Limits,
     pub timestamp_period: f32,
     pub scratch_alignment: u64,
@@ -353,12 +359,30 @@ impl Adapter {
                 .min(resources / 8)
                 .min(500_000);
             let resources = resources - buffers;
-            let textures = (di
+            // (ray queries with the acceleration structures in the heap, `Tlas::index`: every
+            // driver with ray queries updates them after binding)
+            let ray_query =
+                ray_exts && accel.acceleration_structure != 0 && accel.descriptor_binding_acceleration_structure_update_after_bind != 0 && rq.ray_query != 0 && f12.buffer_device_address != 0;
+            let heap_storage_images = f12.descriptor_binding_storage_image_update_after_bind != 0;
+            let heap_acceleration_structures = ray_query;
+            // (the texture slots: a sampled image per texture binding, a storage image and an
+            // acceleration structure each)
+            let texture_bindings = mx_shader::heap::SAMPLERS + heap_storage_images as u32 + heap_acceleration_structures as u32;
+            let mut textures = (di
                 .max_descriptor_set_update_after_bind_sampled_images
                 .min(di.max_per_stage_descriptor_update_after_bind_sampled_images)
                 .min(resources)
-                / mx_shader::heap::SAMPLERS)
+                / texture_bindings)
                 .min(500_000);
+            if heap_storage_images {
+                textures = textures.min(di.max_descriptor_set_update_after_bind_storage_images.min(di.max_per_stage_descriptor_update_after_bind_storage_images));
+            }
+            if heap_acceleration_structures {
+                textures = textures.min(
+                    asp.max_descriptor_set_update_after_bind_acceleration_structures
+                        .min(asp.max_per_stage_descriptor_update_after_bind_acceleration_structures),
+                );
+            }
             let limits = t::Limits {
                 max_texture_dimension_2d: l.max_image_dimension2_d,
                 max_texture_dimension_3d: l.max_image_dimension3_d,
@@ -381,7 +405,7 @@ impl Adapter {
                 api_version: props.api_version,
                 core13,
                 family,
-                ray_query: ray_exts && accel.acceleration_structure != 0 && rq.ray_query != 0 && f12.buffer_device_address != 0,
+                ray_query,
                 device_address: f12.buffer_device_address != 0,
                 timestamps: l.timestamp_compute_and_graphics != 0 && families[family as usize].timestamp_valid_bits > 0,
                 bc: core.texture_compression_bc != 0,
@@ -411,6 +435,9 @@ impl Adapter {
                 f12_float16: f12.shader_float16 != 0,
                 f12_ubo_std_layout: f12.uniform_buffer_standard_layout != 0,
                 update_unused_while_pending: f12.descriptor_binding_update_unused_while_pending != 0,
+                heap_storage_images,
+                storage_image_non_uniform: f12.shader_storage_image_array_non_uniform_indexing != 0,
+                heap_acceleration_structures,
                 max_storage_buffer_range: l.max_storage_buffer_range as u64,
                 limits,
                 timestamp_period: l.timestamp_period,
@@ -647,6 +674,8 @@ impl Adapter {
             .shader_sampled_image_array_non_uniform_indexing(true)
             .descriptor_binding_storage_buffer_update_after_bind(true)
             .shader_storage_buffer_array_non_uniform_indexing(true)
+            .descriptor_binding_storage_image_update_after_bind(caps.heap_storage_images)
+            .shader_storage_image_array_non_uniform_indexing(caps.storage_image_non_uniform)
             .timeline_semaphore(true)
             .draw_indirect_count(caps.draw_indirect_count)
             .shader_int8(caps.f12_int8)
@@ -664,7 +693,9 @@ impl Adapter {
         let mut rob2 = vk::PhysicalDeviceRobustness2FeaturesEXT::default()
             .robust_buffer_access2(caps.robust_buffer_access2)
             .robust_image_access2(caps.robust_image_access2);
-        let mut accel = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
+        let mut accel = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+            .acceleration_structure(true)
+            .descriptor_binding_acceleration_structure_update_after_bind(caps.heap_acceleration_structures);
         let mut rq = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
         // (MoltenVK: enable what the portability subset offers)
         let mut port = vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default();
@@ -729,7 +760,16 @@ impl Adapter {
         let mut sem_type = vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE).initial_value(0);
         // SAFETY: a plain creation on the new device.
         let timeline = unsafe { raw.create_semaphore(&vk::SemaphoreCreateInfo::default().push_next(&mut sem_type), None) }.map_err(|e| vk_err("timeline semaphore", e))?;
-        let heap = Heap::new(&raw, textures, samplers, buffers, caps.update_unused_while_pending, caps.portability)?;
+        let heap = Heap::new(
+            &raw,
+            textures,
+            samplers,
+            buffers,
+            caps.update_unused_while_pending,
+            caps.portability,
+            caps.heap_storage_images,
+            caps.heap_acceleration_structures,
+        )?;
         let (textures, samplers, buffers) = heap.capacity();
         let vendor = a.props.vendor_id;
         let shared = Arc::new(Shared {

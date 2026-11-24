@@ -263,7 +263,8 @@ impl Texture {
         if self.0.dimension == t::TextureDimension::D3 { 1 } else { self.0.size.depth_or_array_layers }
     }
 
-    /// A view. With `TEXTURE_BINDING` usage it gets a bindless index ([`TextureView::index`]).
+    /// A view. With `TEXTURE_BINDING` usage, or as a storage texture (`STORAGE_BINDING`, one mip
+    /// of a 2D view), it gets a bindless index ([`TextureView::index`]).
     pub fn create_view(&self, desc: &t::TextureViewDescriptor<'_>) -> Result<TextureView> {
         let tex = &self.0;
         let shared = &tex.shared;
@@ -290,9 +291,15 @@ impl Texture {
         if let Some(l) = desc.label {
             shared.name(raw, l);
         }
-        let slot = if tex.usage.contains(t::TextureUsages::TEXTURE_BINDING) && !(format.has_stencil() && desc.aspect == t::TextureAspect::All) {
-            let bindings = crate::heap::bindings_for(dimension, format, desc.aspect, tex.sample_count);
-            match shared.heap.lock().add_texture(&shared.raw, raw, bindings) {
+        let sampled = tex.usage.contains(t::TextureUsages::TEXTURE_BINDING) && !(format.has_stencil() && desc.aspect == t::TextureAspect::All);
+        let storage = t::is_heap_storage_view(tex.usage, format, dimension, mip_count);
+        let slot = if sampled || storage {
+            let bindings = if sampled {
+                crate::heap::bindings_for(dimension, format, desc.aspect, tex.sample_count)
+            } else {
+                0
+            };
+            match shared.heap.lock().add_texture(&shared.raw, raw, bindings, storage) {
                 Ok(s) => Some(s),
                 Err(e) => {
                     // SAFETY: just made, unused.

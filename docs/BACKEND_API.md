@@ -110,6 +110,7 @@ impl QuerySet { pub fn count(&self) -> u32; pub fn ty(&self) -> t::QueryType; }
 impl Blas {}
 impl Tlas {    // instances are set by index, as in wgpu: tlas[i] = Some(instance)
     pub fn max_instances(&self) -> u32;
+    pub fn index(&self) -> u32;            // bindless index (`mx_tlas[i]`, heap binding 11)
 }
 impl Index<usize> for Tlas { type Output = Option<t::TlasInstance<Blas>>; }
 impl IndexMut<usize> for Tlas {}       // (needs &mut Tlas: Tlas is not Clone)
