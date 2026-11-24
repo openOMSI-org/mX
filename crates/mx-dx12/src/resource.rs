@@ -534,7 +534,11 @@ impl Texture {
             view.slot = Some(slot);
             view.srv = Some(staging);
         }
+        // (not for a view in a format no UAV may have - the sRGB view of a storage texture,
+        // sampled only: Direct3D 12 removed the device on that UAV with INVALID_CALL, which
+        // took ray tracing's texture atlas, and the whole renderer, down on NVIDIA)
         if tex.usage.contains(t::TextureUsages::STORAGE_BINDING)
+            && t::is_storage_view_format(format)
             && let Some(f) = srv_format
         {
             let d = v.uav(f);

@@ -1032,6 +1032,13 @@ impl Device {
         true
     }
 
+    /// Whether Direct3D 12 removed the device: every call on it fails from then on, and
+    /// nothing made on it again works (a build that failed so goes on to another device).
+    pub fn is_lost(&self) -> bool {
+        // SAFETY: a plain getter.
+        unsafe { self.shared.device.GetDeviceRemovedReason() }.is_err()
+    }
+
     /// Texture views in the heap right now.
     pub fn bindless_textures_in_use(&self) -> usize {
         self.shared.heap.lock().textures_in_use()

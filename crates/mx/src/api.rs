@@ -473,6 +473,11 @@ impl Device {
     pub fn is_done(&self, index: SubmissionIndex) -> bool {
         on!(Device, self, d => d.is_done(si(index)))
     }
+    /// Whether the device is lost for good (Direct3D 12's removed device; elsewhere false):
+    /// a renderer that failed on it is not built again on it.
+    pub fn is_lost(&self) -> bool {
+        on!(Device, self, d => d.is_lost())
+    }
     pub fn bindless_textures_in_use(&self) -> usize {
         on!(Device, self, d => d.bindless_textures_in_use())
     }
