@@ -2,7 +2,7 @@
 //!
 //! | descriptor set | use |
 //! |----------------|-----|
-//! | 0              | the heap: binding `b` is `heap::*` (runtime arrays, UPDATE_AFTER_BIND, PARTIALLY_BOUND); every view of the buffer heap is binding `heap::BUFFERS`, one array of storage buffers |
+//! | 0              | the heap: binding `b` is `heap::*` (runtime arrays, UPDATE_AFTER_BIND, PARTIALLY_BOUND); every view of the buffer heap is binding `heap::BUFFERS`, one array of storage buffers; every view of the storage textures binding `heap::FIRST_STORAGE_TEXTURE`, one array of storage images; `heap::ACCELERATION_STRUCTURES` an array of acceleration structures |
 //! | 1..=7          | root group `g` is set `g + 1`; bindings keep their WGSL numbers |
 //!
 //! `var<immediate>` is the push-constant block (offset 0, every stage of a pipeline).
@@ -20,8 +20,16 @@ pub const HEAP_SET: u32 = 0;
 
 /// The descriptor binding of WGSL heap binding `binding`: buffer views all alias the one array
 /// of storage buffers (Vulkan lets several variables share a binding of the same type).
+/// Likewise every view of the storage textures is binding `heap::FIRST_STORAGE_TEXTURE`, one
+/// array of storage images.
 pub const fn heap_binding(binding: u32) -> u32 {
-    if heap::is_buffer(binding) { heap::BUFFERS } else { binding }
+    if heap::is_buffer(binding) {
+        heap::BUFFERS
+    } else if heap::is_storage_texture(binding) {
+        heap::FIRST_STORAGE_TEXTURE
+    } else {
+        binding
+    }
 }
 
 /// The descriptor set of root group `group`.
@@ -148,8 +156,14 @@ fn capabilities(options: &Options) -> naga::FastHashSet<spv::Capability> {
 /// The binding map of a module: the heap in set 0, root group `g` in set `g + 1`.
 pub fn binding_map(m: &Module) -> spv::BindingMap {
     let mut map = spv::BindingMap::new();
-    let views = m.heap_buffers.iter().map(|v| v.binding);
-    for b in (0..heap::COUNT).chain(views) {
+    // (the prelude's, the shader's buffer views, storage textures and acceleration structures)
+    let declared = m
+        .module
+        .global_variables
+        .iter()
+        .filter_map(|(_, v)| v.binding)
+        .filter(|b| b.group == HEAP_GROUP && b.binding <= heap::LAST_BUFFER_VIEW);
+    for b in declared.map(|b| b.binding) {
         map.insert(
             naga::ResourceBinding { group: HEAP_GROUP, binding: b },
             spv::BindingInfo {
@@ -363,6 +377,7 @@ mod tests {
                 c += textureSample(mx_tex3d[d.i], s, vec3<f32>(uv, 0.5));
                 c += vec4<f32>(textureSampleCompare(mx_texdepth[d.i], mx_samplers_cmp[d.i], uv, 0.5));
                 c += vec4<f32>(textureLoad(mx_tex2d_u32[d.i], vec2<i32>(0), 0));
+                c += vec4<f32>(textureLoad(mx_texdepth_ms[d.i], vec2<i32>(0), 1));
                 c += vec4<f32>(f32(mx_buffers[d.i].w[1]));
                 mx_rw_buffers[d.i].w[0] = 1u;
                 return c;
@@ -384,6 +399,50 @@ mod tests {
             validate(&out.words, env);
             assert_eq!(out.heap_bindings_used, (1 << heap::COUNT) - 1);
         }
+    }
+
+    #[test]
+    fn storage_textures_and_acceleration_structures_in_the_heap() {
+        let m = Module::from_wgsl(
+            "t",
+            "enable wgpu_ray_query;
+            @group(7) @binding(11) var mx_tlas: binding_array<acceleration_structure>;
+            @group(7) @binding(12) var out16: binding_array<texture_storage_2d<rgba16float, write>>;
+            @group(7) @binding(15) var out8: binding_array<texture_storage_2d<rgba8unorm, write>>;
+            struct D { a: u32, o: u32, p: u32 }
+            var<immediate> d: D;
+            @compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                var rq: ray_query;
+                rayQueryInitialize(&rq, mx_tlas[d.a], RayDesc(0u, 0xFFu, 0.0, 10.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0)));
+                rayQueryProceed(&rq);
+                let h = f32(rayQueryGetCommittedIntersection(&rq).instance_custom_data);
+                textureStore(out16[d.o], vec2<i32>(id.xy), vec4<f32>(h));
+                textureStore(out8[d.p], vec2<i32>(id.xy), vec4<f32>(0.5));
+            }",
+        )
+        .unwrap();
+        let out = write(
+            &m,
+            naga::ShaderStage::Compute,
+            None,
+            &[],
+            &Options {
+                lang_version: (1, 5),
+                ray_query: true,
+                debug: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        validate(&out.words, "vulkan1.2");
+        assert_eq!(decoration(&out.words, "mx_tlas"), (Some(HEAP_SET), Some(heap::ACCELERATION_STRUCTURES)));
+        // (every view of the storage textures is the one array of storage images)
+        assert_eq!(decoration(&out.words, "out16"), (Some(HEAP_SET), Some(heap::FIRST_STORAGE_TEXTURE)));
+        assert_eq!(decoration(&out.words, "out8"), (Some(HEAP_SET), Some(heap::FIRST_STORAGE_TEXTURE)));
+        assert_eq!(
+            out.heap_bindings_used,
+            1 << heap::ACCELERATION_STRUCTURES | 1 << heap::FIRST_STORAGE_TEXTURE | 1 << heap::LAST_STORAGE_TEXTURE
+        );
     }
 
     #[test]

@@ -40,6 +40,15 @@ pub mod spirv;
 pub const HEAP_GROUP: u32 = 7;
 
 /// The bindings of the heap, in [`HEAP_GROUP`].
+///
+/// | Binding | Contents | Declared by |
+/// |---------|----------|-------------|
+/// | 0..=6 | sampled textures: [`TEX_2D`] .. [`TEX_DEPTH_MS`] | the prelude |
+/// | 7, 8 | samplers, comparison samplers | the prelude |
+/// | 9, 10 | `mx_buffers`, `mx_rw_buffers` | the prelude |
+/// | 11 | [`ACCELERATION_STRUCTURES`]: `binding_array<acceleration_structure>` | the shader |
+/// | 12..=15 | [`FIRST_STORAGE_TEXTURE`]..=[`LAST_STORAGE_TEXTURE`]: `binding_array<texture_storage_2d<F, write>>` | the shader |
+/// | 16..=63 | [`FIRST_BUFFER_VIEW`]..=[`LAST_BUFFER_VIEW`]: typed buffer views | the shader |
 pub mod heap {
     pub const TEX_2D: u32 = 0;
     pub const TEX_2D_ARRAY: u32 = 1;
@@ -47,20 +56,34 @@ pub mod heap {
     pub const TEX_3D: u32 = 3;
     pub const TEX_DEPTH: u32 = 4;
     pub const TEX_2D_U32: u32 = 5;
-    pub const SAMPLERS: u32 = 6;
-    pub const SAMPLERS_CMP: u32 = 7;
+    /// `mx_texdepth_ms`: multisampled depth textures, read with `textureLoad(t, p, sample)`.
+    pub const TEX_DEPTH_MS: u32 = 6;
+    pub const SAMPLERS: u32 = 7;
+    pub const SAMPLERS_CMP: u32 = 8;
     /// `mx_buffers`: every buffer view, read as words.
-    pub const BUFFERS: u32 = 8;
+    pub const BUFFERS: u32 = 9;
     /// `mx_rw_buffers`: every buffer view, read and written as words.
-    pub const RW_BUFFERS: u32 = 9;
-    /// How many bindings the prelude declares.
-    pub const COUNT: u32 = 10;
+    pub const RW_BUFFERS: u32 = 10;
+    /// How many bindings the prelude declares (`0..COUNT`).
+    pub const COUNT: u32 = 11;
+    /// Top-level acceleration structures (`Tlas::index`), for ray queries. Not in the prelude
+    /// (it would ask every shader for ray queries): a shader declares
+    /// `@group(7) @binding(11) var mx_tlas: binding_array<acceleration_structure>;` itself.
+    pub const ACCELERATION_STRUCTURES: u32 = 11;
+    /// The first binding of a shader's own view of the storage textures:
+    /// `binding_array<texture_storage_2d<F, write>>` for any format `F`, indexed by the index
+    /// of a texture view made with `STORAGE_BINDING`. Every such view is the same array seen
+    /// with another format, as typed buffer views are.
+    pub const FIRST_STORAGE_TEXTURE: u32 = 12;
+    /// The last one.
+    pub const LAST_STORAGE_TEXTURE: u32 = 15;
     /// The first binding a shader may give its own typed view of the buffer heap.
     pub const FIRST_BUFFER_VIEW: u32 = 16;
     /// The last one.
     pub const LAST_BUFFER_VIEW: u32 = 63;
 
-    /// Whether a heap binding holds textures.
+    /// Whether a heap binding holds sampled textures (the prelude's texture arrays; they are
+    /// `0..SAMPLERS`, contiguous).
     pub const fn is_texture(binding: u32) -> bool {
         binding < SAMPLERS
     }
@@ -74,6 +97,16 @@ pub mod heap {
     pub const fn is_buffer(binding: u32) -> bool {
         binding == BUFFERS || binding == RW_BUFFERS || (binding >= FIRST_BUFFER_VIEW && binding <= LAST_BUFFER_VIEW)
     }
+
+    /// Whether a heap binding is a view of the storage textures.
+    pub const fn is_storage_texture(binding: u32) -> bool {
+        binding >= FIRST_STORAGE_TEXTURE && binding <= LAST_STORAGE_TEXTURE
+    }
+
+    /// Whether a heap binding holds acceleration structures.
+    pub const fn is_acceleration_structure(binding: u32) -> bool {
+        binding == ACCELERATION_STRUCTURES
+    }
 }
 
 /// Declarations every mX shader can use. Appended after the user's source, so the line
@@ -86,11 +119,12 @@ pub const PRELUDE: &str = "
 @group(7) @binding(3) var mx_tex3d: binding_array<texture_3d<f32>>;
 @group(7) @binding(4) var mx_texdepth: binding_array<texture_depth_2d>;
 @group(7) @binding(5) var mx_tex2d_u32: binding_array<texture_2d<u32>>;
-@group(7) @binding(6) var mx_samplers: binding_array<sampler>;
-@group(7) @binding(7) var mx_samplers_cmp: binding_array<sampler_comparison>;
+@group(7) @binding(6) var mx_texdepth_ms: binding_array<texture_depth_multisampled_2d>;
+@group(7) @binding(7) var mx_samplers: binding_array<sampler>;
+@group(7) @binding(8) var mx_samplers_cmp: binding_array<sampler_comparison>;
 struct MxWords { w: array<u32> }
-@group(7) @binding(8) var<storage, read> mx_buffers: binding_array<MxWords>;
-@group(7) @binding(9) var<storage, read_write> mx_rw_buffers: binding_array<MxWords>;
+@group(7) @binding(9) var<storage, read> mx_buffers: binding_array<MxWords>;
+@group(7) @binding(10) var<storage, read_write> mx_rw_buffers: binding_array<MxWords>;
 ";
 
 /// The largest group a root binding may use.
@@ -365,6 +399,37 @@ fn reflect_heap_buffers(label: &str, module: &naga::Module) -> Result<Vec<HeapBu
         let name = var.name.as_deref().unwrap_or("?");
         let is_view = heap::is_buffer(rb.binding);
         let prelude = rb.binding < heap::COUNT;
+        let element = match module.types[var.ty].inner {
+            naga::TypeInner::BindingArray { base, .. } => Some(&module.types[base].inner),
+            _ => None,
+        };
+        if heap::is_acceleration_structure(rb.binding) {
+            if !matches!(element, Some(naga::TypeInner::AccelerationStructure { .. })) {
+                return Err(layout_err(format!(
+                    "`{name}`: heap binding {} holds acceleration structures: `binding_array<acceleration_structure>`",
+                    rb.binding
+                )));
+            }
+            continue;
+        }
+        if heap::is_storage_texture(rb.binding) {
+            let ok = matches!(
+                element,
+                Some(naga::TypeInner::Image {
+                    dim: naga::ImageDimension::D2,
+                    arrayed: false,
+                    class: naga::ImageClass::Storage { access, .. },
+                }) if *access == naga::StorageAccess::STORE
+            );
+            if !ok {
+                return Err(layout_err(format!(
+                    "`{name}`: heap bindings {}..={} hold storage textures: `binding_array<texture_storage_2d<F, write>>`",
+                    heap::FIRST_STORAGE_TEXTURE,
+                    heap::LAST_STORAGE_TEXTURE
+                )));
+            }
+            continue;
+        }
         if !prelude && !is_view {
             return Err(layout_err(format!(
                 "`{name}`: heap bindings {}..{} are reserved; give a buffer view a binding in {}..={}",
@@ -533,6 +598,28 @@ mod tests {
         ];
         for src in bad {
             assert!(matches!(Module::from_wgsl("t", src), Err(ShaderError::Layout { .. }) | Err(ShaderError::Validate { .. })), "{src}");
+        }
+    }
+
+    #[test]
+    fn storage_textures_and_acceleration_structures_are_checked() {
+        let ok = "enable wgpu_ray_query;\n@group(7) @binding(11) var tlas: binding_array<acceleration_structure>;\n@group(7) @binding(12) var a: binding_array<texture_storage_2d<rgba16float, write>>;\n@group(7) @binding(13) var b: binding_array<texture_storage_2d<rgba8unorm, write>>;\nstruct D { i: u32 }\nvar<immediate> d: D;\n@compute @workgroup_size(1) fn main() { var rq: ray_query; rayQueryInitialize(&rq, tlas[d.i], RayDesc(0u, 0xFFu, 0.0, 1.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0))); textureStore(a[d.i], vec2<i32>(0), vec4<f32>(textureLoad(mx_texdepth_ms[d.i], vec2<i32>(0), 0))); textureStore(b[d.i], vec2<i32>(0), vec4<f32>(1.0)); }";
+        let m = Module::from_wgsl("t", ok).unwrap();
+        let used = m.entry_point_heap(naga::ShaderStage::Compute, "main").unwrap();
+        assert_eq!(used, 1 << heap::TEX_DEPTH_MS | 1 << heap::ACCELERATION_STRUCTURES | 1 << 12 | 1 << 13);
+        assert!(m.heap_buffers.iter().all(|v| v.binding == heap::BUFFERS || v.binding == heap::RW_BUFFERS));
+        let bad = [
+            // not acceleration structures at 11
+            "@group(7) @binding(11) var x: binding_array<texture_2d<f32>>;",
+            // storage textures that are read
+            "@group(7) @binding(12) var x: binding_array<texture_storage_2d<rgba16float, read_write>>;",
+            // not 2D
+            "@group(7) @binding(14) var x: binding_array<texture_storage_3d<rgba16float, write>>;",
+            // a buffer at a storage texture binding
+            "struct L { l: array<u32> }\n@group(7) @binding(15) var<storage, read> x: binding_array<L>;",
+        ];
+        for src in bad {
+            assert!(matches!(Module::from_wgsl("t", src), Err(ShaderError::Layout { .. })), "{src}");
         }
     }
 

@@ -7,14 +7,21 @@
 //! |-------|-----------|-----|
 //! | 0..=6 | `b{binding}` / `t{binding}` / `u{binding}` | root group `space`: uniform buffers (CBV), sampled textures, read-only storage and acceleration structures (SRV), storage buffers and textures (UAV) |
 //! | 7     | `t{group}` | the sampler index buffer of group `group` (0..=7; 7 is the heap's) |
-//! | 8..=13 | `t0` .. `t{heap size - 1}` | heap texture binding `space - 8` (`heap::TEX_2D` .. `heap::TEX_2D_U32`) |
-//! | 14    | `s0` / `s2048` | naga's sampler heaps (`nagaSamplerHeap`, `nagaComparisonSamplerHeap`), 2048 each |
+//! | 8..=14 | `t0` .. `t{heap size - 1}` | heap texture binding `space - 8` (`heap::TEX_2D` .. `heap::TEX_DEPTH_MS`) |
 //! | 15    | `b0` / `b1` | immediates (root constants) / naga's special constants (first vertex, first instance, workgroup count) |
 //! | 16 + `b` | `t0` .. / `u0` .. | view `b` of the buffer heap (`heap::BUFFERS`, `heap::RW_BUFFERS`, a shader's own): `ByteAddressBuffer`s when read-only, `RWByteAddressBuffer`s when written |
+//! | 27    | `t0` .. `t{heap size - 1}` | `heap::ACCELERATION_STRUCTURES`: `RaytracingAccelerationStructure`s over the texture slots |
+//! | 28..=31 | `u0` .. `u{heap size - 1}` | a shader's views of the storage textures (`heap::FIRST_STORAGE_TEXTURE + space - 28`): `RWTexture2D`s |
+//! | 80    | `s0` / `s2048` | naga's sampler heaps (`nagaSamplerHeap`, `nagaComparisonSamplerHeap`), 2048 each |
 //!
 //! Buffers: every buffer view in the heap has a raw SRV and a raw UAV in the shader-visible
 //! CBV/SRV/UAV heap, after the texture slots. Each view a shader declares gets its own space,
 //! and the root signature points all of them at the same descriptors.
+//!
+//! Texture slots hold an SRV each: a texture view's, or a top-level acceleration structure's
+//! (they share the index space). A view with `STORAGE_BINDING` also has a UAV at its index in
+//! a second range of `heap size` descriptors, which every storage-texture view of a shader
+//! reads.
 //!
 //! Samplers: naga's HLSL backend (as wgpu-hal uses it) reaches every sampler through one
 //! shader-visible sampler heap and a per-group `StructuredBuffer<uint>` of heap indices. For a
@@ -35,7 +42,7 @@ pub const SAMPLER_INDEX_SPACE: u32 = 7;
 /// The space of heap binding 0; heap texture binding `b` is in `HEAP_SPACE + b`.
 pub const HEAP_SPACE: u32 = 8;
 /// The space of the sampler heaps.
-pub const SAMPLER_HEAP_SPACE: u32 = 14;
+pub const SAMPLER_HEAP_SPACE: u32 = 80;
 /// The register of the comparison sampler heap in [`SAMPLER_HEAP_SPACE`].
 pub const COMPARISON_SAMPLER_REGISTER: u32 = 2048;
 /// How many samplers naga's sampler heap declarations hold (and so the sampler heap).
@@ -52,9 +59,10 @@ pub const MAX_UNIFORM_BUFFERS: u32 = 12;
 /// The space of buffer view 0 of the heap; view `b` is in `BUFFER_SPACE + b`.
 pub const BUFFER_SPACE: u32 = 16;
 
-/// The space of heap texture binding `binding`, or of buffer view `binding`.
+/// The space of heap texture binding `binding`, or of any other heap binding (buffer views,
+/// acceleration structures, storage textures).
 pub const fn heap_space(binding: u32) -> u32 {
-    if heap::is_buffer(binding) { BUFFER_SPACE + binding } else { HEAP_SPACE + binding }
+    if heap::is_texture(binding) { HEAP_SPACE + binding } else { BUFFER_SPACE + binding }
 }
 
 /// How large the heap's arrays are declared (naga's HLSL writer needs a length).
@@ -80,7 +88,7 @@ pub fn options(m: &Module, shader_model: ShaderModel, heap: HeapSizes) -> hlsl::
     for (_, var) in m.module.global_variables.iter() {
         let Some(rb) = var.binding else { continue };
         let bt = if rb.group == HEAP_GROUP {
-            if heap::is_texture(rb.binding) {
+            if heap::is_texture(rb.binding) || heap::is_storage_texture(rb.binding) || heap::is_acceleration_structure(rb.binding) {
                 hlsl::BindTarget {
                     binding_array_size: Some(heap.textures),
                     ..target(heap_space(rb.binding), 0)
@@ -254,7 +262,7 @@ mod tests {
         let src = compact(&out.source);
         for want in [
             "ByteAddressBuffer lights[16384] : register(t0, space32)",
-            "RWByteAddressBuffer mx_rw_buffers[16384] : register(u0, space25)",
+            "RWByteAddressBuffer mx_rw_buffers[16384] : register(u0, space26)",
             "RWByteAddressBuffer counters[16384] : register(u0, space34)",
             "lights[_e",
             "mx_rw_buffers[_e",
@@ -280,8 +288,8 @@ mod tests {
             "register(t2, space1)",           // root texture
             "register(t0, space8)",           // mx_tex2d
             "register(t0, space12)",          // mx_texdepth
-            "register(s0, space14)",          // sampler heap
-            "register(s2048, space14)",       // comparison sampler heap
+            "register(s0, space80)",          // sampler heap
+            "register(s2048, space80)",       // comparison sampler heap
             "register(t1, space7)",           // group 1's sampler indices
             "register(t7, space7)",           // the heap's sampler indices
             "register(b0, space15)",          // immediates
@@ -296,6 +304,27 @@ mod tests {
         assert_eq!(out.profile, "ps_6_5");
         let roots: Vec<_> = out.roots.iter().map(|r| (r.group, r.binding)).collect();
         assert_eq!(roots, [(0, 0), (1, 2), (1, 4), (2, 1), (2, 3)]);
+    }
+
+    #[test]
+    fn storage_textures_and_acceleration_structures_in_the_heap() {
+        let m = Module::from_wgsl(
+            "t",
+            "enable wgpu_ray_query;\n@group(7) @binding(11) var mx_tlas: binding_array<acceleration_structure>;\n@group(7) @binding(12) var a: binding_array<texture_storage_2d<rgba16float, write>>;\n@group(7) @binding(13) var b: binding_array<texture_storage_2d<rgba8unorm, write>>;\nstruct D { t: u32, d: u32, o: u32 }\nvar<immediate> d: D;\n@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>) { var rq: ray_query; rayQueryInitialize(&rq, mx_tlas[d.t], RayDesc(0u, 0xFFu, 0.0, 10.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0))); rayQueryProceed(&rq); let z = textureLoad(mx_texdepth_ms[d.d], vec2<i32>(id.xy), 1); textureStore(a[d.o], vec2<i32>(id.xy), vec4<f32>(z)); textureStore(b[d.o], vec2<i32>(id.xy), vec4<f32>(f32(rayQueryGetCommittedIntersection(&rq).instance_custom_data))); }",
+        )
+        .unwrap();
+        let out = write(&m, S::Compute, None, &[], SM, HEAP, None).unwrap();
+        let src = compact(&out.source);
+        for want in [
+            "RaytracingAccelerationStructure mx_tlas[65536] : register(t0, space27)",
+            "RWTexture2D<float4> a[65536] : register(u0, space28)",
+            "RWTexture2D<unorm float4> b[65536] : register(u0, space29)",
+            "Texture2DMS<float> mx_texdepth_ms[65536] : register(t0, space14)",
+            "mx_texdepth_ms[_e",
+        ] {
+            assert!(src.contains(want), "missing `{want}` in:\n{}", out.source);
+        }
+        assert_eq!(out.heap_bindings_used, 1 << heap::TEX_DEPTH_MS | 1 << heap::ACCELERATION_STRUCTURES | 1 << 12 | 1 << 13);
     }
 
     #[test]

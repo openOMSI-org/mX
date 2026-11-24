@@ -1,7 +1,7 @@
 # mX's changes to naga 30.0.2
 
-This is naga 30.0.2 from crates.io with one change, used through `[patch.crates-io]` in the
-workspace's `Cargo.toml`. Shaders that do not use the feature below compile exactly as with
+This is naga 30.0.2 from crates.io with the changes below, used through `[patch.crates-io]` in
+the workspace's `Cargo.toml`. Shaders that do not use these features compile exactly as with
 the published crate.
 
 ## Binding arrays of storage buffers in the HLSL writer
@@ -49,3 +49,21 @@ and their pipelines failed on OpenGL.
   `sampler2DMS`), is `texelFetch(..).x`, with the bounds-check policy of sampled images
   (`Restrict` writes its clamped level for depth textures too). A depth texture that is also
   sampled stays a shadow sampler, and a load from it is still an error.
+
+## Binding arrays of acceleration structures
+
+mX's heap holds top-level acceleration structures (`binding_array<acceleration_structure>`,
+heap binding 11).
+
+- `valid/analyzer.rs`: the capability check of an access into a binding array took every
+  element that is neither an image nor a sampler for a buffer and reached `unreachable!()` on
+  the `Handle` address space. An acceleration structure now asks for
+  `ACCELERATION_STRUCTURE_BINDING_ARRAY`.
+- `back/msl/writer.rs`: a binding array of acceleration structures was refused
+  (`UnsupportedArrayOfType`). It is written as the other handle arrays are, an argument buffer of
+  `instance_acceleration_structure` (MSL 2.4 and later), which Metal 3 fills with the
+  structures' `gpuResourceID`s.
+
+The SPIR-V and HLSL writers needed nothing: SPIR-V gets a runtime array of
+`OpTypeAccelerationStructureKHR`, HLSL an array of `RaytracingAccelerationStructure` (sized,
+as every heap array).

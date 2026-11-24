@@ -4,7 +4,7 @@
 //! |-------------|-----|
 //! | 0           | immediates |
 //! | 1           | sizes of runtime-sized root storage buffers, then of the vertex buffers |
-//! | 2..=22      | the heap bindings the entry point uses, in binding order, each an argument buffer of `MTLResourceID`s (textures, samplers) or of GPU addresses (buffers); then its root buffers, in (group, binding) order |
+//! | 2..=22      | the heap bindings the entry point uses, in binding order, each an argument buffer of `MTLResourceID`s (textures, storage textures, acceleration structures, samplers) or of GPU addresses (buffers); then its root buffers, in (group, binding) order |
 //! | 23..=30     | vertex buffers, `30 - index` |
 //!
 //! Root textures and samplers take texture / sampler slots from 0 in (group, binding) order.
@@ -50,6 +50,8 @@ pub enum RootSlot {
 /// What a heap binding's argument buffer holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HeapTable {
+    /// `MTLResourceID`s of texture views and of top-level acceleration structures (one index
+    /// space): every texture array, storage-texture view and `heap::ACCELERATION_STRUCTURES`.
     Textures,
     Samplers,
     Buffers,
@@ -57,7 +59,7 @@ pub enum HeapTable {
 
 impl HeapTable {
     pub const fn of(binding: u32) -> HeapTable {
-        if heap::is_texture(binding) {
+        if heap::is_texture(binding) || heap::is_storage_texture(binding) || heap::is_acceleration_structure(binding) {
             HeapTable::Textures
         } else if heap::is_sampler(binding) {
             HeapTable::Samplers
@@ -261,6 +263,9 @@ pub fn write_lowered(
         let root = if heap::is_sampler(slot.heap_binding) {
             samplers += 1;
             RootSlot::Sampler(samplers - 1)
+        } else if heap::is_acceleration_structure(slot.heap_binding) {
+            next_buffer += 1;
+            RootSlot::AccelerationStructure(next_buffer - 1)
         } else if heap::is_buffer(slot.heap_binding) {
             next_buffer += 1;
             RootSlot::Buffer {
@@ -443,6 +448,41 @@ mod tests {
         assert_eq!(out.sized_buffers[..2], [(HEAP_GROUP, 16), (0, 0)]);
         let fields = out.source.split("struct _mslBufferSizes {").nth(1).unwrap().split("};").next().unwrap().matches(';').count();
         assert_eq!(fields, out.sized_buffers.len(), "{}", out.source);
+    }
+
+    const NEW_KINDS: &str = "enable wgpu_ray_query;\n@group(7) @binding(11) var mx_tlas: binding_array<acceleration_structure>;\n@group(7) @binding(12) var out: binding_array<texture_storage_2d<rgba16float, write>>;\nstruct D { a: u32, d: u32, o: u32 }\nvar<immediate> d: D;\n@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>) { var rq: ray_query; rayQueryInitialize(&rq, mx_tlas[d.a], RayDesc(0u, 0xFFu, 0.0, 10.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0))); rayQueryProceed(&rq); let h = f32(rayQueryGetCommittedIntersection(&rq).instance_custom_data); textureStore(out[d.o], vec2<i32>(id.xy), vec4<f32>(textureLoad(mx_texdepth_ms[d.d], vec2<i32>(id.xy), 1), h, 0.0, 1.0)); }";
+
+    #[test]
+    fn storage_textures_and_acceleration_structures_read_the_texture_table() {
+        let m = Module::from_wgsl("t", NEW_KINDS).unwrap();
+        let layout = Layout::for_entry_point(&m, naga::ShaderStage::Compute, "main").unwrap();
+        assert_eq!(layout.heap, BTreeMap::from([(heap::TEX_DEPTH_MS, 2), (heap::ACCELERATION_STRUCTURES, 3), (12, 4)]));
+        assert!(layout.heap_tables().all(|(_, t)| t == HeapTable::Textures));
+        let out = write(&m, &layout, naga::ShaderStage::Compute, None, &[], (3, 1), &[]).unwrap();
+        for want in [
+            "NagaArgumentBufferWrapper<metal::depth2d_ms<float, metal::access::read>>* mx_texdepth_ms [[buffer(2)]]",
+            "NagaArgumentBufferWrapper<metal::raytracing::instance_acceleration_structure>* mx_tlas [[buffer(3)]]",
+            "NagaArgumentBufferWrapper<metal::texture2d<float, metal::access::write>>* out [[buffer(4)]]",
+        ] {
+            assert!(out.source.contains(want), "missing `{want}`:\n{}", out.source);
+        }
+    }
+
+    #[test]
+    fn storage_textures_and_acceleration_structures_bound_directly() {
+        let m = Module::from_wgsl("t", NEW_KINDS).unwrap();
+        let (out, _, slots) = write_lowered(&m, naga::ShaderStage::Compute, None, &[], (3, 1), &[], true).unwrap().unwrap();
+        let roots: Vec<_> = slots.iter().map(|s| (s.slot.heap_binding, s.root)).collect();
+        assert_eq!(
+            roots,
+            [
+                (heap::ACCELERATION_STRUCTURES, RootSlot::AccelerationStructure(FIRST_HEAP_SLOT)),
+                (12, RootSlot::Texture(0)),
+                (heap::TEX_DEPTH_MS, RootSlot::Texture(1)),
+            ]
+        );
+        assert!(out.source.contains("metal::texture2d<float, metal::access::write>"), "{}", out.source);
+        assert!(out.source.contains("metal::depth2d_ms<float, metal::access::read>"), "{}", out.source);
     }
 
     #[test]
