@@ -1,9 +1,10 @@
-//! The bindless heap: argument buffers of `MTLResourceID`s (textures, samplers) and of GPU
-//! addresses (buffer views), slot allocation with deferred reuse, and the residency list the
-//! encoders hand to `useResources`.
+//! The bindless heap: argument buffers of `MTLResourceID`s (textures, top-level acceleration
+//! structures, samplers) and of GPU addresses (buffer views), slot allocation with deferred
+//! reuse, and the residency list the encoders hand to `useResources`.
 
 use std::collections::HashMap;
 use std::ptr::NonNull;
+use std::sync::Arc;
 
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2_metal::*;
@@ -146,6 +147,14 @@ pub(crate) struct Heap {
     views_of: HashMap<usize, Vec<u32>>,
     /// Views passes may write: declared by every encoder.
     hot: HashMap<u32, Mt<Po<dyn MTLTexture>>>,
+    /// Views of textures with `STORAGE_BINDING`, which shaders may write through the heap:
+    /// declared for writing by every encoder.
+    storage: HashMap<u32, Mt<Po<dyn MTLTexture>>>,
+    /// Top-level acceleration structures in the texture table, declared (with the bottom-level
+    /// structures of their last build) by every encoder.
+    tlases: HashMap<u32, Arc<crate::rt::TlasShared>>,
+    /// Acceleration structures released but maybe still read by the GPU, kept alive until then.
+    retired_tlases: Vec<(u64, Arc<crate::rt::TlasShared>)>,
     /// Views of textures copied into, declared until the submission that wrote them is done.
     recent: Vec<(u64, Mt<Po<dyn MTLTexture>>)>,
     /// Resources (by owner) written by a submission not yet done: a view put in the heap after
@@ -175,6 +184,9 @@ impl Heap {
             owner: HashMap::new(),
             views_of: HashMap::new(),
             hot: HashMap::new(),
+            storage: HashMap::new(),
+            tlases: HashMap::new(),
+            retired_tlases: Vec::new(),
             recent: Vec::new(),
             writes: HashMap::new(),
         })
@@ -186,8 +198,8 @@ impl Heap {
     }
 
     /// Put view `tex` of texture `owner` (its `Arc` address) in the heap. `hot`: passes
-    /// may write the texture.
-    pub fn add_texture(&mut self, tex: &Po<dyn MTLTexture>, owner: usize, hot: bool) -> Result<u32> {
+    /// may write the texture; `storage`: shaders may write it through the heap.
+    pub fn add_texture(&mut self, tex: &Po<dyn MTLTexture>, owner: usize, hot: bool, storage: bool) -> Result<u32> {
         let slot = self.textures.alloc("textures")?;
         self.textures.write(slot, tex.gpuResourceID());
         self.dense_of[slot as usize] = self.resident.len() as u32;
@@ -195,7 +207,9 @@ impl Heap {
         self.resident.push(Mt(tex.clone()));
         self.owner.insert(slot, (owner, hot));
         self.views_of.entry(owner).or_default().push(slot);
-        if hot {
+        if storage {
+            self.storage.insert(slot, Mt(tex.clone()));
+        } else if hot {
             self.hot.insert(slot, Mt(tex.clone()));
         } else if let Some(&until) = self.writes.get(&owner) {
             self.recent.push((until, Mt(tex.clone())));
@@ -259,9 +273,35 @@ impl Heap {
             }
         }
         self.hot.remove(&slot);
+        self.storage.remove(&slot);
         self.retired.push((after, tex));
         self.textures.deferred.push((after, slot));
         self.generation += 1;
+    }
+
+    /// Put a top-level acceleration structure in the texture table (`Tlas::index`).
+    pub fn add_tlas(&mut self, tlas: &Arc<crate::rt::TlasShared>) -> Result<u32> {
+        let slot = self.textures.alloc("textures")?;
+        self.textures.write(slot, tlas.raw.gpuResourceID());
+        self.tlases.insert(slot, tlas.clone());
+        self.generation += 1;
+        Ok(slot)
+    }
+
+    /// Take a top-level acceleration structure out of the heap. Its slot is reused once
+    /// submission `after` is done.
+    pub fn remove_tlas(&mut self, slot: u32, after: u64) {
+        if let Some(t) = self.tlases.remove(&slot) {
+            self.retired_tlases.push((after, t));
+        }
+        self.textures.deferred.push((after, slot));
+        self.generation += 1;
+    }
+
+    /// The top-level acceleration structure at heap `slot` (for a pipeline that binds it
+    /// directly).
+    pub fn tlas_at(&self, slot: u32) -> Option<&Arc<crate::rt::TlasShared>> {
+        self.tlases.get(&slot)
     }
 
     pub fn add_sampler(&mut self, s: &Po<dyn MTLSamplerState>) -> Result<u32> {
@@ -388,6 +428,7 @@ impl Heap {
             keep
         });
         self.set_dirty |= removed;
+        self.retired_tlases.retain(|(after, _)| *after > completed);
         self.writes.retain(|_, until| *until > completed);
         let before = self.recent.len();
         self.recent.retain(|(until, _)| *until > completed);
@@ -429,8 +470,14 @@ impl Heap {
     /// What an encoder declares: resources it reads, and buffers shaders may write.
     fn resource_lists(&self, written: &[usize]) -> (ResourceList, ResourceList) {
         let buf = |b: &Mt<Po<dyn MTLBuffer>>| NonNull::from(ProtocolObject::<dyn MTLResource>::from_ref(&*b.0));
+        let tex = |t: &Mt<Po<dyn MTLTexture>>| NonNull::from(ProtocolObject::<dyn MTLResource>::from_ref(&*t.0));
+        let accel = |a: &Po<dyn MTLAccelerationStructure>| NonNull::from(ProtocolObject::<dyn MTLResource>::from_ref(&**a));
         let mut read = self.resource_list(written);
-        let mut write = Vec::new();
+        let mut write: ResourceList = self.storage.values().map(tex).collect();
+        for t in self.tlases.values() {
+            read.push(accel(&t.raw));
+            read.extend(t.built_with.lock().iter().map(|b| accel(&b.0.raw)));
+        }
         for (owner, (b, _, writable)) in &self.heap_buffers {
             if *writable > 0 {
                 write.push(buf(b));
@@ -447,11 +494,12 @@ impl Heap {
     fn resource_list(&self, written: &[usize]) -> Vec<NonNull<ProtocolObject<dyn MTLResource>>> {
         let ptr = |t: &Mt<Po<dyn MTLTexture>>| NonNull::from(ProtocolObject::<dyn MTLResource>::from_ref(&*t.0));
         if self.set.is_none() {
-            return self.resident.iter().map(ptr).collect();
+            // (storage textures are declared for writing, in `resource_lists`)
+            return self.resident.iter().zip(&self.slot_of).filter(|(_, s)| !self.storage.contains_key(s)).map(|(t, _)| ptr(t)).collect();
         }
         let mut list: Vec<_> = self.hot.values().map(ptr).chain(self.recent.iter().map(|(_, t)| ptr(t))).collect();
         for owner in written {
-            for &slot in self.views_of.get(owner).into_iter().flatten() {
+            for &slot in self.views_of.get(owner).into_iter().flatten().filter(|s| !self.storage.contains_key(s)) {
                 list.push(ptr(&self.resident[self.dense_of[slot as usize] as usize]));
             }
         }

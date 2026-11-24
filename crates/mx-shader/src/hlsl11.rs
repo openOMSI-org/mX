@@ -210,6 +210,7 @@ pub fn write(m: &Module, s: &Stage, uav_base: u32, fragment: Option<(&Module, &s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::heap;
     use naga::ShaderStage as S;
 
     fn compact(s: &str) -> String {
@@ -233,6 +234,22 @@ mod tests {
         assert!(!src.contains("ConstantBuffer<"), "shader model 5.0 has none: {src}");
         assert_eq!(out.profile, "ps_5_0");
         assert_eq!(out.slots.len(), 2);
+    }
+
+    #[test]
+    fn storage_textures_are_uavs_and_multisampled_depth_an_srv() {
+        let m = Module::from_wgsl(
+            "t",
+            "@group(7) @binding(13) var out: binding_array<texture_storage_2d<rgba8unorm, write>>;\nstruct D { d: u32, o: u32 }\nvar<immediate> d: D;\n@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>) { textureStore(out[d.o], vec2<i32>(id.xy), vec4<f32>(textureLoad(mx_texdepth_ms[d.d], vec2<i32>(id.xy), 1))); }",
+        )
+        .unwrap();
+        let s = crate::bound::stage(&m, S::Compute, None, &[]).unwrap();
+        let out = write(&m, &s, 0, None).unwrap();
+        let src = compact(&out.source);
+        assert!(src.contains("RWTexture2D<unorm float4>") && src.contains("register(u0)"), "{src}");
+        assert!(src.contains("Texture2DMS<float>") && src.contains("register(t0)"), "{src}");
+        let classes: Vec<_> = out.slots.iter().map(|(s, c, r)| (s.heap_binding, *c, *r)).collect();
+        assert_eq!(classes, [(13, Class::Uav, 0), (heap::TEX_DEPTH_MS, Class::Srv, 0)]);
     }
 
     /// Immediates read as values (not heap indices) stay a constant buffer, at `b13`.

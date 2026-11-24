@@ -46,7 +46,8 @@ rendering and synchronization2.
 ## The heap
 
 Every texture view created from a texture with `TextureUsages::TEXTURE_BINDING` receives an
-index, and so does every sampler:
+index, and so does every sampler (and every storage view and top-level acceleration
+structure, below):
 
 ```rust
 let view = texture.create_view(&Default::default())?;
@@ -56,20 +57,26 @@ let (t, s) = (view.index(), sampler.index());
 
 Shaders read the heap through arrays that mX declares for them, in group 7:
 
-| Array | Type |
-|-------|------|
-| `mx_tex2d` | `binding_array<texture_2d<f32>>` |
-| `mx_tex2d_array` | `binding_array<texture_2d_array<f32>>` |
-| `mx_texcube` | `binding_array<texture_cube<f32>>` |
-| `mx_tex3d` | `binding_array<texture_3d<f32>>` |
-| `mx_texdepth` | `binding_array<texture_depth_2d>` |
-| `mx_tex2d_u32` | `binding_array<texture_2d<u32>>` |
-| `mx_samplers` | `binding_array<sampler>` |
-| `mx_samplers_cmp` | `binding_array<sampler_comparison>` |
+| Binding | Array | Type |
+|---------|-------|------|
+| 0 | `mx_tex2d` | `binding_array<texture_2d<f32>>` |
+| 1 | `mx_tex2d_array` | `binding_array<texture_2d_array<f32>>` |
+| 2 | `mx_texcube` | `binding_array<texture_cube<f32>>` |
+| 3 | `mx_tex3d` | `binding_array<texture_3d<f32>>` |
+| 4 | `mx_texdepth` | `binding_array<texture_depth_2d>` |
+| 5 | `mx_tex2d_u32` | `binding_array<texture_2d<u32>>` |
+| 6 | `mx_texdepth_ms` | `binding_array<texture_depth_multisampled_2d>` |
+| 7 | `mx_samplers` | `binding_array<sampler>` |
+| 8 | `mx_samplers_cmp` | `binding_array<sampler_comparison>` |
+| 9, 10 | `mx_buffers`, `mx_rw_buffers` | buffer views, below |
+
+Bindings 11 to 63 are for arrays a shader declares itself: acceleration structures (11),
+storage textures (12 to 15) and typed buffer views (16 to 63), below.
 
 A texture index is valid in the array that matches the view's dimension and sample type: a 2D
 view is `mx_tex2d[i]`, a cube view `mx_texcube[i]`, a 2D depth view both `mx_tex2d[i]` and
-`mx_texdepth[i]`. Samplers have their own index space, and comparison samplers are read
+`mx_texdepth[i]`, a multisampled depth view `mx_texdepth_ms[i]` (read with
+`textureLoad(mx_texdepth_ms[i], p, sample)`). Samplers have their own index space, and comparison samplers are read
 through `mx_samplers_cmp`.
 
 When a view or sampler is dropped, its index returns to the heap only after every submission
@@ -121,6 +128,45 @@ works in all of them. What the bindless model asks of the renderer:
   draws of one pass that write and read the same heap buffer need the same care as in any
   other API.
 
+## Storage textures in the heap
+
+A view of a texture made with `TextureUsages::STORAGE_BINDING` that shows one mip of a 2D
+texture gets an index too (the same one, if the texture also has `TEXTURE_BINDING`). Shaders
+write it through a view of the storage textures they declare at bindings 12 to 15, of any
+format:
+
+```wgsl
+@group(7) @binding(12) var out_hdr: binding_array<texture_storage_2d<rgba16float, write>>;
+@group(7) @binding(13) var out_ldr: binding_array<texture_storage_2d<rgba8unorm, write>>;
+struct Pass { hdr: u32, ldr: u32 }
+var<immediate> pass_: Pass;
+
+@compute @workgroup_size(8, 8) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+    textureStore(out_hdr[pass_.hdr], vec2<i32>(id.xy), vec4<f32>(1.0));
+}
+```
+
+Every such array is the same array of storage textures, seen with another format: the format a
+shader declares must be the view's. Storage textures are write-only (`write` access). On
+OpenGL they need OpenGL 4.2 or ES 3.1, on Vulkan
+`descriptorBindingStorageImageUpdateAfterBind`; a pipeline that uses them fails elsewhere.
+
+## Acceleration structures in the heap
+
+A top-level acceleration structure has an index in the heap, `tlas.index()`, from the index
+space of texture views. A shader that runs ray queries declares the array at binding 11 (it is
+not in the prelude, which would ask every shader for ray queries):
+
+```wgsl
+enable wgpu_ray_query;
+@group(7) @binding(11) var mx_tlas: binding_array<acceleration_structure>;
+
+rayQueryInitialize(&rq, mx_tlas[draw.tlas], desc);
+```
+
+The index reads what the structure's last build made. It is available where
+`adapter.supports_ray_query()` is (not on the bound tier).
+
 ## Immediates
 
 Small per-draw data, typically heap indices and a few constants, goes in immediates
@@ -154,8 +200,8 @@ let group = device.create_bind_group(&mx::BindGroupDescriptor {
 pass.set_bind_group(0, &group);
 ```
 
-Use them for uniform and storage buffers, storage textures and acceleration structures, and
-for shaders that have not moved to the heap yet. Textures and samplers can be bound here too,
+Use them for shaders that have not moved to the heap yet, and for uniform buffers read at
+per-draw offsets (`set_buffer_offset`). Textures and samplers can be bound here too,
 which is how wgpu code runs unchanged on `wgpu-mx`.
 
 ## Pipelines and shaders

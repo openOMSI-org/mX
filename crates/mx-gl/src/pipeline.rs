@@ -306,7 +306,7 @@ impl Device {
                     || s.lowered
                         .slots
                         .iter()
-                        .any(|slot| m.0.module.heap_buffers.iter().any(|v| v.binding == slot.heap_binding && !v.read_only))
+                        .any(|slot| mx_shader::heap::is_storage_texture(slot.heap_binding) || m.0.module.heap_buffers.iter().any(|v| v.binding == slot.heap_binding && !v.read_only))
             });
             Ok((
                 program,

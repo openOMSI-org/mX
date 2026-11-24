@@ -906,6 +906,15 @@ unsafe fn bind(gl: &glow::Context, shared: &Shared, st: &mut State, b: &Bindings
                             None => log::warn!("{label}: heap texture {index} is empty"),
                         },
                         Class::Sampler => samplers[s.gl as usize] = heap.sampler(index),
+                        Class::Image => match heap.texture(index) {
+                            Some(crate::heap::TextureSlot {
+                                raw,
+                                base_mip,
+                                image: Some((internal, layer)),
+                                ..
+                            }) => gl.bind_image_texture(s.gl as u32, Some(raw), base_mip as i32, false, layer as i32, glow::WRITE_ONLY, internal),
+                            _ => log::warn!("{label}: heap index {index} is not a storage texture"),
+                        },
                         Class::StorageBuffer => match heap.buffer(index) {
                             Some(buf) => gl.bind_buffer_range(glow::SHADER_STORAGE_BUFFER, s.gl as u32, Some(buf.raw), buf.offset as i32, buf.size as i32),
                             None => log::warn!("{label}: heap buffer {index} is empty"),
@@ -915,7 +924,6 @@ unsafe fn bind(gl: &glow::Context, shared: &Shared, st: &mut State, b: &Bindings
                             Some(buf) => gl.bind_buffer_range(glow::UNIFORM_BUFFER, s.gl as u32, Some(buf.raw), buf.offset as i32, buf.size as i32),
                             None => log::warn!("{label}: heap buffer {index} is empty"),
                         },
-                        _ => {}
                     }
                 }
             }

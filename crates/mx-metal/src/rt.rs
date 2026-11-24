@@ -46,7 +46,16 @@ pub struct Tlas {
     update_mode: t::AccelerationStructureUpdateMode,
     /// Instances in the last build (a refit needs the same count and structures).
     last_count: parking_lot::Mutex<Option<usize>>,
+    /// Its place in the heap's texture table ([`Tlas::index`]).
+    slot: u32,
     shared: Arc<Shared>,
+}
+
+impl Drop for Tlas {
+    fn drop(&mut self) {
+        let after = self.shared.release_after();
+        self.shared.heap.lock().remove_tlas(self.slot, after);
+    }
 }
 
 /// The part of a top-level structure bind groups hold on to.
@@ -60,6 +69,13 @@ pub(crate) struct TlasShared {
 impl Tlas {
     pub fn max_instances(&self) -> u32 {
         self.instances.len() as u32
+    }
+
+    /// The structure's index in the bindless heap: `mx_tlas[i]` in WGSL, with
+    /// `@group(7) @binding(11) var mx_tlas: binding_array<acceleration_structure>;`. It shares
+    /// the index space of texture views.
+    pub fn index(&self) -> u32 {
+        self.slot
     }
 
     /// The `MTLAccelerationStructure`, for interop.
@@ -189,11 +205,14 @@ impl Device {
         if let Some(l) = desc.label {
             raw.setLabel(Some(&crate::ns(l)));
         }
+        let inner = Arc::new(TlasShared {
+            raw: Mt(raw),
+            built_with: parking_lot::Mutex::new(Arc::new(Vec::new())),
+        });
+        let slot = self.shared.heap.lock().add_tlas(&inner)?;
         Ok(Tlas {
-            inner: Arc::new(TlasShared {
-                raw: Mt(raw),
-                built_with: parking_lot::Mutex::new(Arc::new(Vec::new())),
-            }),
+            inner,
+            slot,
             instances: vec![None; desc.max_instances as usize],
             flags: desc.flags,
             update_mode: desc.update_mode,

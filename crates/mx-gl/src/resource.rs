@@ -271,7 +271,8 @@ impl Texture {
         self.0.raw
     }
 
-    /// A view. With `TEXTURE_BINDING` usage it gets a heap index ([`TextureView::index`]).
+    /// A view. With `TEXTURE_BINDING` usage, or as a storage texture (`STORAGE_BINDING`, one mip
+    /// of a 2D view), it gets a heap index ([`TextureView::index`]).
     ///
     /// GL samples a texture whole: a view chooses mips (set when it is bound) but no other
     /// format and no single layer of an array to sample as a 2D texture (those need GL 4.3's
@@ -288,13 +289,16 @@ impl Texture {
         let mip_count = desc.mip_level_count.unwrap_or(tex.mip_level_count - desc.base_mip_level);
         let layer_count = desc.array_layer_count.unwrap_or(layers - desc.base_array_layer);
         let format = desc.format.unwrap_or(tex.format);
-        let slot = if tex.usage.contains(t::TextureUsages::TEXTURE_BINDING) && !(format.has_stencil() && desc.aspect == t::TextureAspect::All) {
+        let sampled = tex.usage.contains(t::TextureUsages::TEXTURE_BINDING) && !(format.has_stencil() && desc.aspect == t::TextureAspect::All);
+        let storage = t::is_heap_storage_view(tex.usage, format, dimension, mip_count);
+        let slot = if sampled || storage {
             Some(tex.shared.heap.lock().add_texture(TextureSlot {
                 raw: tex.raw,
                 target: tex.target,
                 base_mip: desc.base_mip_level,
                 mip_count,
                 depth_stencil_mode: depth_stencil_mode(format, desc.aspect),
+                image: storage.then(|| (crate::conv::format(format).internal, desc.base_array_layer)),
             })?)
         } else {
             None
@@ -338,6 +342,7 @@ impl ViewInner {
             base_mip: self.base_mip_level,
             mip_count: self.mip_level_count,
             depth_stencil_mode: depth_stencil_mode(self.format, self.aspect),
+            image: None,
         }
     }
 }

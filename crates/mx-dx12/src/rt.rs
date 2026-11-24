@@ -54,6 +54,16 @@ pub struct Tlas {
     update_mode: t::AccelerationStructureUpdateMode,
     /// Instances in the last build (an update needs the same count and structures).
     last_count: parking_lot::Mutex<Option<usize>>,
+    /// Its texture slot in the heap ([`Tlas::index`]).
+    slot: u32,
+    shared: Arc<Shared>,
+}
+
+impl Drop for Tlas {
+    fn drop(&mut self) {
+        let after = self.shared.release_after();
+        self.shared.heap.lock().release_tlas(self.slot, after, self.inner.clone());
+    }
 }
 
 /// The part of a top-level structure bind groups hold on to.
@@ -67,6 +77,13 @@ pub(crate) struct TlasShared {
 impl Tlas {
     pub fn max_instances(&self) -> u32 {
         self.instances.len() as u32
+    }
+
+    /// The structure's index in the bindless heap: `mx_tlas[i]` in WGSL, with
+    /// `@group(7) @binding(11) var mx_tlas: binding_array<acceleration_structure>;`. It shares
+    /// the index space of texture views (its SRV is in a texture slot).
+    pub fn index(&self) -> u32 {
+        self.slot
     }
 
     /// The acceleration structure's buffer, for interop.
@@ -198,12 +215,25 @@ impl Device {
     pub fn create_tlas(&self, desc: &t::CreateTlasDescriptor<'_>) -> Result<Tlas> {
         let info = self.shared.prebuild(&tlas_inputs(desc.max_instances, 0, desc.flags))?;
         let (raw, va) = self.shared.as_buffer(info.ResultDataMaxSizeInBytes, desc.label.unwrap_or("TLAS"))?;
+        let slot = self.shared.heap.lock().alloc_texture()?;
+        let srv = D3D12_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_UNKNOWN,
+            ViewDimension: D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE,
+            Shader4ComponentMapping: D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+            Anonymous: D3D12_SHADER_RESOURCE_VIEW_DESC_0 {
+                RaytracingAccelerationStructure: D3D12_RAYTRACING_ACCELERATION_STRUCTURE_SRV { Location: va },
+            },
+        };
+        // SAFETY: an acceleration structure's SRV (no resource: its address) into a fresh slot.
+        unsafe { self.shared.device.CreateShaderResourceView(None, Some(&srv), self.shared.views.view_cpu(slot)) };
         Ok(Tlas {
             inner: Arc::new(TlasShared {
                 raw,
                 va,
                 built_with: parking_lot::Mutex::new(Arc::new(Vec::new())),
             }),
+            slot,
+            shared: self.shared.clone(),
             instances: vec![None; desc.max_instances as usize],
             flags: desc.flags,
             update_mode: desc.update_mode,

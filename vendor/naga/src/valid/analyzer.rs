@@ -575,6 +575,10 @@ impl FunctionInfo {
                             crate::TypeInner::Sampler { .. } => {
                                 super::Capabilities::TEXTURE_AND_SAMPLER_BINDING_ARRAY_NON_UNIFORM_INDEXING
                             }
+                            // (mX) An acceleration structure is a handle, not a buffer.
+                            crate::TypeInner::AccelerationStructure { .. } => {
+                                super::Capabilities::ACCELERATION_STRUCTURE_BINDING_ARRAY
+                            }
                             // If we're anything but an image or sampler, assume we're a buffer and use the address space.
                             _ => {
                                 if let E::GlobalVariable(global_handle) = expression_arena[base] {

@@ -139,6 +139,21 @@ impl Device {
 
     fn stage(&self, m: &ShaderModule, stage: ShaderStage, entry: Option<&str>, constants: &[(&str, f64)]) -> Result<(Stage, [u32; 3])> {
         let out = spirv::write(&m.0.module, stage, entry, constants, &self.shared.spirv)?;
+        let storage_bits: u64 = (mx_shader::heap::FIRST_STORAGE_TEXTURE..=mx_shader::heap::LAST_STORAGE_TEXTURE).fold(0, |b, i| b | 1 << i);
+        let uses_storage = out.heap_bindings_used & storage_bits != 0;
+        let caps = &self.shared.caps;
+        if uses_storage && !caps.heap_storage_images {
+            return Err(Error::Unsupported(format!(
+                "{}: storage textures in the bindless heap (descriptorBindingStorageImageUpdateAfterBind)",
+                m.0.module.label
+            )));
+        }
+        if out.heap_bindings_used & 1 << mx_shader::heap::ACCELERATION_STRUCTURES != 0 && !caps.heap_acceleration_structures {
+            return Err(Error::Unsupported(format!(
+                "{}: acceleration structures in the bindless heap (ray queries with descriptorBindingAccelerationStructureUpdateAfterBind)",
+                m.0.module.label
+            )));
+        }
         let info = vk::ShaderModuleCreateInfo::default().code(&out.words);
         // SAFETY: valid SPIR-V words from naga.
         let module = unsafe { self.shared.raw.create_shader_module(&info, None) }.map_err(|e| Error::Compile {
@@ -147,7 +162,8 @@ impl Device {
         })?;
         let name = CString::new(out.entry_point).expect("entry point names have no NUL");
         let writes = out.roots.iter().any(|r| matches!(r.kind, RootKind::StorageBuffer { read_only: false } | RootKind::StorageTexture))
-            || m.0.module.heap_buffers.iter().any(|v| !v.read_only && out.heap_bindings_used & (1 << v.binding) != 0);
+            || m.0.module.heap_buffers.iter().any(|v| !v.read_only && out.heap_bindings_used & (1 << v.binding) != 0)
+            || uses_storage;
         Ok((
             Stage {
                 module,

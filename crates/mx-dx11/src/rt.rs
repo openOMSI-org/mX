@@ -17,6 +17,11 @@ impl Tlas {
     pub fn max_instances(&self) -> u32 {
         self.instances.len() as u32
     }
+
+    /// (never called: this backend makes no acceleration structures)
+    pub fn index(&self) -> u32 {
+        unreachable!("no acceleration structures on this backend")
+    }
 }
 
 impl Index<usize> for Tlas {

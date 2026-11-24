@@ -1,7 +1,7 @@
 //! The heap on the CPU: what each index stands for, with the deferred reuse of the other
 //! backends. Draws bind from it (see `command::bind_stage`).
 
-use windows::Win32::Graphics::Direct3D11::{ID3D11SamplerState, ID3D11ShaderResourceView};
+use windows::Win32::Graphics::Direct3D11::{ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11UnorderedAccessView};
 
 use crate::resource::Buffer;
 use crate::{Error, Result};
@@ -69,8 +69,16 @@ impl<T: Clone> Slots<T> {
     }
 }
 
+/// A texture view: its shader resource view (`TEXTURE_BINDING`), and its unordered access view
+/// when it is a storage texture of the heap.
+#[derive(Clone)]
+pub(crate) struct TextureSlot {
+    pub srv: Option<ID3D11ShaderResourceView>,
+    pub uav: Option<ID3D11UnorderedAccessView>,
+}
+
 pub(crate) struct Heap {
-    textures: Slots<ID3D11ShaderResourceView>,
+    textures: Slots<TextureSlot>,
     samplers: Slots<ID3D11SamplerState>,
     buffers: Slots<BufferSlot>,
 }
@@ -87,13 +95,13 @@ impl Heap {
         }
     }
 
-    pub fn add_texture(&mut self, t: ID3D11ShaderResourceView) -> Result<u32> {
+    pub fn add_texture(&mut self, t: TextureSlot) -> Result<u32> {
         self.textures.add(t, "textures")
     }
     pub fn remove_texture(&mut self, slot: u32, after: u64) {
         self.textures.remove(slot, after);
     }
-    pub fn texture(&self, slot: u32) -> Option<&ID3D11ShaderResourceView> {
+    pub fn texture(&self, slot: u32) -> Option<&TextureSlot> {
         self.textures.get(slot)
     }
 

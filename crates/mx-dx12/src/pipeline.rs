@@ -6,8 +6,8 @@
 //! | index | parameter |
 //! |-------|-----------|
 //! | 0 | naga's special constants (`b1, space15`): first vertex, first instance / workgroup count |
-//! | 1 | the heap: one SRV range per typed texture array (`t0, space8..=13`, all from descriptor 0) and the heap group's sampler index buffer (`t7, space7`, descriptor `T`) |
-//! | 2 | the sampler heap: `s0` and `s2048` of `space14`, both from sampler 0 |
+//! | 1 | the heap: one SRV range per typed texture array (`t0, space8..=14`, all from descriptor 0), the heap group's sampler index buffer (`t7, space7`, descriptor `T`), and a range per buffer view, storage-texture view and acceleration-structure array the stages use |
+//! | 2 | the sampler heap: `s0` and `s2048` of `space80`, both from sampler 0 |
 //! | 3 | immediates (`b0, space15`), if the pipeline has any |
 //! | then | one descriptor table per root group the pipeline uses, in group order |
 
@@ -66,6 +66,9 @@ pub(crate) struct Layout {
     pub heap_buffers: bool,
     /// It may write them (a UAV barrier follows).
     pub heap_buffer_writes: bool,
+    /// It writes storage textures through the heap: a command list puts the heap's storage
+    /// textures in `UNORDERED_ACCESS` for its draws and dispatches.
+    pub heap_storage: bool,
 }
 
 pub(crate) struct RenderPipelineInner {
@@ -128,7 +131,9 @@ fn uses_f16(m: &mx_shader::Module) -> bool {
 struct Stage {
     code: Arc<Vec<u8>>,
     roots: Vec<RootBinding>,
-    /// The buffer views of the heap it uses: (binding, read-only).
+    /// The buffer views of the heap it uses: (binding, read-only); and its views of the
+    /// storage textures (written) and acceleration structures (read-only), each a range of the
+    /// heap table too.
     heap_buffers: Vec<(u32, bool)>,
 }
 
@@ -160,6 +165,11 @@ impl Device {
                 .iter()
                 .filter(|v| out.heap_bindings_used & (1 << v.binding) != 0)
                 .map(|v| (v.binding, v.read_only))
+                .chain(
+                    (heap::ACCELERATION_STRUCTURES..=heap::LAST_STORAGE_TEXTURE)
+                        .filter(|b| out.heap_bindings_used & (1 << b) != 0)
+                        .map(|b| (b, heap::is_acceleration_structure(b))),
+                )
                 .collect();
         log::trace!("{label} ({stage:?}) HLSL:\n{}", out.source);
         let key = (out.source, out.entry_point, out.profile);
@@ -380,7 +390,12 @@ impl Device {
             .map(|b| range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, t, 0, hlsl::heap_space(b), 0))
             .chain(std::iter::once(range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, mx_shader::HEAP_GROUP, hlsl::SAMPLER_INDEX_SPACE, t)))
             .chain(views.iter().map(|&(b, read_only)| {
-                if read_only {
+                if heap::is_acceleration_structure(b) {
+                    // (top-level structures' SRVs are in the texture slots)
+                    range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, t, 0, hlsl::heap_space(b), 0)
+                } else if heap::is_storage_texture(b) {
+                    range(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, t, 0, hlsl::heap_space(b), v.storage_uav(0))
+                } else if read_only {
                     range(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, v.buffers, 0, hlsl::heap_space(b), v.buffer_srv(0))
                 } else {
                     range(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, v.buffers, 0, hlsl::heap_space(b), v.buffer_uav(0))
@@ -487,8 +502,9 @@ impl Device {
             signature,
             groups,
             immediates,
-            heap_buffers: !views.is_empty(),
-            heap_buffer_writes: views.iter().any(|&(_, read_only)| !read_only),
+            heap_buffers: views.iter().any(|&(b, _)| heap::is_buffer(b)),
+            heap_buffer_writes: views.iter().any(|&(b, read_only)| heap::is_buffer(b) && !read_only),
+            heap_storage: views.iter().any(|&(b, _)| heap::is_storage_texture(b)),
         })
     }
 

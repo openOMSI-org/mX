@@ -110,6 +110,7 @@ impl QuerySet { pub fn count(&self) -> u32; pub fn ty(&self) -> t::QueryType; }
 impl Blas {}
 impl Tlas {    // instances are set by index, as in wgpu: tlas[i] = Some(instance)
     pub fn max_instances(&self) -> u32;
+    pub fn index(&self) -> u32;            // bindless index (`mx_tlas[i]`, heap binding 11)
 }
 impl Index<usize> for Tlas { type Output = Option<t::TlasInstance<Blas>>; }
 impl IndexMut<usize> for Tlas {}       // (needs &mut Tlas: Tlas is not Clone)
@@ -214,26 +215,31 @@ for textures created outside mX (XR swapchain images). The raw types are the bac
 ## Shader slot layout
 
 Each backend maps WGSL `(group, binding)` itself (naga's per-backend binding maps). The heap
-is always group 7 with the bindings in `mx_shader::heap` (and buffer views at 16..=63); root
-groups are 0..=6.
+is always group 7 with the bindings in `mx_shader::heap` (acceleration structures at 11,
+storage-texture views at 12..=15, buffer views at 16..=63, all three declared by the shader);
+root groups are 0..=6.
 - Metal: `mx_shader::msl`. Immediates at buffer 0, sizes at 1, then each heap binding the
-  entry point uses (argument buffers of `MTLResourceID`s for textures and samplers, of GPU
+  entry point uses (argument buffers of `MTLResourceID`s for textures, storage textures,
+  acceleration structures and samplers, of GPU
   addresses for buffer views) and its root buffers, assigned per entry point; vertex buffers at
   `30 - index`. A pipeline binds its stages' heap tables when it is set.
 - Vulkan: `mx_shader::spirv`. Set 0 = heap (UPDATE_AFTER_BIND | PARTIALLY_BOUND
-  bindings: the texture and sampler arrays, and binding 8, the storage buffers every buffer
-  view of a shader aliases), sets 1..=7 = root groups 0..=6 (one descriptor set
+  bindings: the texture and sampler arrays; binding 9, the storage buffers every buffer
+  view of a shader aliases; binding 11, acceleration structures; binding 12, the storage
+  images every storage-texture view aliases), sets 1..=7 = root groups 0..=6 (one descriptor set
   layout per group, built from the pipeline's reflected roots), immediates = push constants.
 - Direct3D 12: `mx_shader::hlsl`. The heap as descriptor ranges in one root table
   (textures: an SRV range per heap binding, all starting at heap offset 0, registers
   `t0, space{8 + binding}`, as long as the device's heap: naga's HLSL writer cannot declare
-  an unbounded array), samplers through naga's sampler heap (`s0` / `s2048`, `space14`) and
+  an unbounded array), samplers through naga's sampler heap (`s0` / `s2048`, `space80`) and
   per-group sampler index buffers (`t{group}, space7`; the heap group's is the identity, a
   root group's indexed by binding), root group `g` as one descriptor table (registers
   `b|t|u{binding}, space{g}`), immediates as root constants (`b0, space15`), naga's special
   constants at `b1, space15`. Buffer views: raw SRVs and raw UAVs after the texture slots,
   one range per view a pipeline's stages use (`t0` or `u0`, `space{16 + binding}`), all over
-  the same descriptors.
+  the same descriptors. Acceleration structures: SRVs in the texture slots, a range at
+  `t0, space27`. Storage textures: a UAV per texture slot after the buffers' UAVs, one range
+  per storage-texture view (`u0, space{16 + binding}`).
 
 Compile with wgpu-hal's settings for the same API so output matches: naga bounds-check
 policies as wgpu-hal sets them for a checked module on that API (`Module::bounds_check_policies()`

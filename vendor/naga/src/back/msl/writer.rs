@@ -7692,6 +7692,13 @@ template <typename A>
                                         ));
                                     }
                                 },
+                                // (mX) Acceleration structures in an argument buffer: their
+                                // `gpuResourceID`s, as Metal 3 encodes them.
+                                crate::TypeInner::AccelerationStructure { .. } => {
+                                    if options.lang_version < (2, 4) {
+                                        return Err(Error::UnsupportedRayTracing);
+                                    }
+                                }
                                 _ => {
                                     return Err(Error::UnsupportedArrayOfType(base));
                                 }

@@ -38,7 +38,7 @@ the others are not yet sorted into what OpenGL's paths leave out and what mX dra
 
 | Suite | Result |
 |-------|--------|
-| Conformance tests, 30 (`crates/mx/tests/conformance.rs`) | pass on Metal (2026-11-23, under Metal's API and shader validation; earlier with and without the residency set and with direct heap textures); pass on MoltenVK under the Khronos layer with synchronization validation (2026-11-23); pass in CI on lavapipe, WARP and llvmpipe's OpenGL |
+| Conformance tests, 33 (`crates/mx/tests/conformance.rs`) | pass on Metal (2026-11-23, under Metal's API and shader validation; earlier with and without the residency set and with direct heap textures); pass on MoltenVK under the Khronos layer with synchronization validation (2026-11-23); pass in CI on lavapipe, WARP and llvmpipe's OpenGL |
 | Pixel parity with wgpu, 7 scenes and 21 of openOMSI's full-screen passes | identical bytes on Metal and on MoltenVK |
 | openOMSI's 23 WGSL modules of its mX renderer (`crates/mx/tests/openomsi`, openOMSI 940ab2f97) | compile through DXC (shader model 6.8) on Direct3D 12 (WARP, in CI), on lavapipe and MoltenVK under the Khronos layer with no findings, and on Metal (2026-11-23) |
 | openOMSI's 17 OpenGL modules (`crates/mx/tests/openomsi_gl`, its `gl_backend()` variants) | every vertex and fragment entry point compiles as GLSL through the driver on ANGLE over Metal (OpenGL ES 3.0, 2026-11-23) and in CI on llvmpipe (ES 3.2, GL 4.5 core); the native set compiles on Metal 2 (`MX_METAL_BOUND=1`) |
@@ -113,6 +113,23 @@ through its device proxy), and FSR 3 on Vulkan with one queue for all of AMD's r
   renderer tests but those needing ray tracing.
 - `mx-dx11`, Direct3D 11 (feature level 11.0, `ID3D11DeviceContext1`): compiled, not run.
   `Backends::DX11`, `MX_BACKENDS=dx11`. See BOUND_TIER.md.
+
+## More of the heap (2026-11-23)
+
+The heap holds multisampled depth textures (`mx_texdepth_ms`, binding 6), storage textures
+(views with `STORAGE_BINDING`; shaders declare `binding_array<texture_storage_2d<F, write>>`
+at bindings 12 to 15) and top-level acceleration structures (`Tlas::index`; shaders declare
+`binding_array<acceleration_structure>` at binding 11). Samplers moved to bindings 7 and 8,
+`mx_buffers` / `mx_rw_buffers` to 9 and 10. naga patched for binding arrays of acceleration
+structures (`vendor/naga/MX_PATCHES.md`).
+
+| Backend | State |
+|---------|-------|
+| Metal 3 | the three conformance tests pass, with and without direct heap textures and the residency set, under Metal's API and shader validation |
+| Metal 2 (`MX_METAL_BOUND=1`) | MS depth and storage textures pass; acceleration structures refused |
+| Vulkan | MS depth and storage textures pass on MoltenVK under the Khronos layer (no new reports); acceleration structures compiled (MoltenVK has no ray queries) |
+| OpenGL | written; ANGLE's ES 3.0 skips both (no multisampled textures or images); for llvmpipe in CI |
+| Direct3D 12, Direct3D 11 | compiled for `x86_64-pc-windows-gnu`; for WARP in CI (Direct3D 12) |
 
 ## Shader cache on disk (2026-11-23)
 

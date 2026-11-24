@@ -49,6 +49,8 @@ fn root_class(kind: RootKind) -> Class {
 fn slot_class(slot: &Slot) -> Class {
     if heap::is_texture(slot.heap_binding) {
         Class::Texture
+    } else if heap::is_storage_texture(slot.heap_binding) {
+        Class::Image
     } else if heap::is_sampler(slot.heap_binding) {
         Class::Sampler
     } else if slot.uniform {
@@ -89,6 +91,9 @@ impl Layout {
         }
         for (i, s) in stages.iter().enumerate() {
             for slot in &s.lowered.slots {
+                if heap::is_acceleration_structure(slot.heap_binding) {
+                    return Err("ray queries need a device with bindless (Metal 3, Vulkan, Direct3D 12)".into());
+                }
                 let c = slot_class(slot);
                 bindings.insert(stage_slot(i, slot.binding), (c, take(c)?));
             }
@@ -394,6 +399,38 @@ mod tests {
             panic!("a load from a sampled depth texture")
         };
         assert!(e.to_string().contains("also sampled"), "{e}");
+    }
+
+    #[test]
+    fn storage_textures_and_multisampled_depth_become_slots() {
+        let m = Module::from_wgsl(
+            "t",
+            "@group(7) @binding(12) var out: binding_array<texture_storage_2d<rgba16float, write>>;\nstruct D { d: u32, o: u32 }\nvar<immediate> d: D;\n@compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>) { textureStore(out[d.o], vec2<i32>(id.xy), vec4<f32>(textureLoad(mx_texdepth_ms[d.d], vec2<i32>(id.xy), 1))); }",
+        )
+        .unwrap();
+        let cs = stage(&m, S::Compute, None, &[]).unwrap();
+        let slots: Vec<_> = cs.lowered.slots.iter().map(|s| (s.heap_binding, s.index)).collect();
+        assert_eq!(slots, [(12, Index::Immediate(4)), (heap::TEX_DEPTH_MS, Index::Immediate(0))]);
+        let layout = Layout::for_pipeline(&[&cs]).unwrap();
+        assert_eq!(layout.slot(0, cs.lowered.slots[0].binding), Some((Class::Image, 0)));
+        assert_eq!(layout.slot(0, cs.lowered.slots[1].binding), Some((Class::Texture, 0)));
+        let options = Options {
+            version: Version::Embedded { version: 310, is_webgl: false },
+            ..OPTIONS
+        };
+        let out = write(&m, &cs, 0, &layout, &options).unwrap();
+        validate(&out.source, S::Compute);
+        assert!(out.source.contains("image2D"), "{}", out.source);
+        assert!(out.source.contains("sampler2DMS"), "{}", out.source);
+
+        let rq = Module::from_wgsl(
+            "t",
+            "enable wgpu_ray_query;\n@group(7) @binding(11) var tlas: binding_array<acceleration_structure>;\nstruct D { t: u32 }\nvar<immediate> d: D;\n@compute @workgroup_size(1) fn main() { var rq: ray_query; rayQueryInitialize(&rq, tlas[d.t], RayDesc(0u, 0xFFu, 0.0, 1.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0))); }",
+        )
+        .unwrap();
+        let cs = stage(&rq, S::Compute, None, &[]).unwrap();
+        let e = Layout::for_pipeline(&[&cs]).unwrap_err();
+        assert!(e.contains("ray queries"), "{e}");
     }
 
     #[test]

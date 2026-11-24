@@ -101,6 +101,16 @@ pub struct Tlas {
     update_mode: t::AccelerationStructureUpdateMode,
     /// Instances in the last build (an update needs the same count and structures).
     last_count: parking_lot::Mutex<Option<u32>>,
+    /// Its place in the heap ([`Tlas::index`]).
+    slot: u32,
+    shared: Arc<Shared>,
+}
+
+impl Drop for Tlas {
+    fn drop(&mut self) {
+        let after = self.shared.release_after();
+        self.shared.heap.lock().remove_tlas(self.slot, after);
+    }
 }
 
 /// The part of a top-level structure bind groups hold on to.
@@ -114,6 +124,13 @@ pub(crate) struct TlasShared {
 impl Tlas {
     pub fn max_instances(&self) -> u32 {
         self.instances.len() as u32
+    }
+
+    /// The structure's index in the bindless heap: `mx_tlas[i]` in WGSL, with
+    /// `@group(7) @binding(11) var mx_tlas: binding_array<acceleration_structure>;`. It shares
+    /// the index space of texture views.
+    pub fn index(&self) -> u32 {
+        self.slot
     }
 
     /// The `VkAccelerationStructureKHR`, for interop.
@@ -257,12 +274,16 @@ impl Device {
         let geoms = [instance_geometry(0)];
         let s = build_sizes(shared, vk::AccelerationStructureTypeKHR::TOP_LEVEL, desc.flags, &geoms, &[desc.max_instances]);
         let accel = create_accel(shared, vk::AccelerationStructureTypeKHR::TOP_LEVEL, s.acceleration_structure_size, desc.label)?;
+        let inner = Arc::new(TlasShared {
+            raw: accel.raw,
+            _accel: accel,
+            built_with: parking_lot::Mutex::new(Arc::new(Vec::new())),
+        });
+        let slot = shared.heap.lock().add_tlas(&shared.raw, inner.raw)?;
         Ok(Tlas {
-            inner: Arc::new(TlasShared {
-                raw: accel.raw,
-                _accel: accel,
-                built_with: parking_lot::Mutex::new(Arc::new(Vec::new())),
-            }),
+            inner,
+            slot,
+            shared: shared.clone(),
             instances: vec![None; desc.max_instances as usize],
             flags: desc.flags,
             update_mode: desc.update_mode,

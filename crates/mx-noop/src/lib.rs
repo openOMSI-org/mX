@@ -600,7 +600,8 @@ impl Texture {
         });
         let mips = desc.mip_level_count.unwrap_or(tex.mip_level_count.saturating_sub(desc.base_mip_level));
         let count = desc.array_layer_count.unwrap_or(layers.saturating_sub(desc.base_array_layer));
-        let index = if tex.usage.contains(t::TextureUsages::TEXTURE_BINDING) {
+        let format = desc.format.unwrap_or(tex.format);
+        let index = if tex.usage.contains(t::TextureUsages::TEXTURE_BINDING) || t::is_heap_storage_view(tex.usage, format, dimension, mips) {
             Some(tex.shared.textures.lock().take("texture views")?)
         } else {
             None
@@ -741,6 +742,11 @@ pub struct Tlas {
 impl Tlas {
     pub fn max_instances(&self) -> u32 {
         self.instances.len() as u32
+    }
+
+    /// (never called: this backend makes no acceleration structures)
+    pub fn index(&self) -> u32 {
+        unreachable!("no acceleration structures on this backend")
     }
 }
 
