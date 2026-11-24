@@ -57,8 +57,11 @@ impl<T: Copy> Slots<T> {
         Ok(slot)
     }
 
+    /// Free a slot once submission `after` is done. Its entry stays readable until then:
+    /// GL replays command buffers at submission, so a draw recorded before the view was
+    /// dropped (a mip level rendered from the one above, its view gone by the submit) still
+    /// binds what it was recorded with.
     fn remove(&mut self, slot: u32, after: u64) {
-        self.items[slot as usize] = None;
         self.in_use -= 1;
         self.deferred.push((after, slot));
     }
@@ -68,10 +71,11 @@ impl<T: Copy> Slots<T> {
     }
 
     fn reclaim(&mut self, completed: u64) {
-        let free = &mut self.free;
+        let (free, items) = (&mut self.free, &mut self.items);
         self.deferred.retain(|&(after, slot)| {
             let done = after <= completed;
             if done {
+                items[slot as usize] = None;
                 free.push(slot);
             }
             !done
@@ -135,5 +139,28 @@ impl Heap {
     }
     pub fn buffers_in_use(&self) -> usize {
         self.buffers.in_use
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A removed slot still reads its entry until its submission is done, and only then
+    /// goes back to the free list.
+    #[test]
+    fn a_removed_slot_reads_until_reclaimed() {
+        let mut s = Slots::<u32>::new(4);
+        let a = s.add(7, "t").unwrap();
+        s.remove(a, 3);
+        assert_eq!(s.get(a), Some(7));
+        assert_eq!(s.in_use, 0);
+        let b = s.add(8, "t").unwrap();
+        assert_ne!(a, b, "not reused before its submission is done");
+        s.reclaim(2);
+        assert_eq!(s.get(a), Some(7));
+        s.reclaim(3);
+        assert_eq!(s.get(a), None);
+        assert_eq!(s.add(9, "t").unwrap(), a);
     }
 }

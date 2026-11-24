@@ -828,23 +828,72 @@ unsafe fn apply_render_state(gl: &glow::Context, shared: &Shared, p: &RenderPipe
         if p.multisample.count > 1 && p.multisample.mask as u32 != u32::MAX {
             log::warn!("{}: multisample masks are not applied on OpenGL", p.label);
         }
+        // Targets that blend and mask alike (nearly all) are set at once. The per-buffer calls
+        // are GL 4.0 / ES 3.2 or `OES_draw_buffers_indexed` under its own names: glow's
+        // `glEnablei` failed on ANGLE's ES 3.0 and left blending off, so an interface's text
+        // punched transparent holes in the picture under it.
+        let same = p.targets.windows(2).all(|w| w[0] == w[1]);
+        let oes = if shared.ctx.api == crate::context::Api::Es && shared.caps.version < (3, 2) {
+            shared.ctx.indexed_oes
+        } else {
+            None
+        };
+        let indexed = shared.caps.indexed_draw_buffers && (oes.is_some() || !(shared.ctx.api == crate::context::Api::Es && shared.caps.version < (3, 2)));
+        if same || !indexed {
+            if !same {
+                log::warn!("{}: targets with different blending take the first's on this OpenGL", p.label);
+            }
+            if let Some(target) = p.targets.first() {
+                let m = target.mask;
+                gl.color_mask(
+                    m.contains(t::ColorWrites::RED),
+                    m.contains(t::ColorWrites::GREEN),
+                    m.contains(t::ColorWrites::BLUE),
+                    m.contains(t::ColorWrites::ALPHA),
+                );
+                match target.blend {
+                    Some((color, alpha, ops)) => {
+                        gl.enable(glow::BLEND);
+                        gl.blend_func_separate(color[0], color[1], alpha[0], alpha[1]);
+                        gl.blend_equation_separate(ops[0], ops[1]);
+                    }
+                    None => gl.disable(glow::BLEND),
+                }
+            }
+            return;
+        }
         for (i, target) in p.targets.iter().enumerate() {
             let i = i as u32;
             let m = target.mask;
-            gl.color_mask_draw_buffer(
-                i,
+            let (r, g, b, a) = (
                 m.contains(t::ColorWrites::RED),
                 m.contains(t::ColorWrites::GREEN),
                 m.contains(t::ColorWrites::BLUE),
                 m.contains(t::ColorWrites::ALPHA),
             );
-            match target.blend {
-                Some((color, alpha, ops)) => {
-                    gl.enable_draw_buffer(glow::BLEND, i);
-                    gl.blend_func_separate_draw_buffer(i, color[0], color[1], alpha[0], alpha[1]);
-                    gl.blend_equation_separate_draw_buffer(i, ops[0], ops[1]);
+            match oes {
+                Some(o) => {
+                    (o.color_mask)(i, r as u8, g as u8, b as u8, a as u8);
+                    match target.blend {
+                        Some((color, alpha, ops)) => {
+                            (o.enable)(glow::BLEND, i);
+                            (o.blend_func_separate)(i, color[0], color[1], alpha[0], alpha[1]);
+                            (o.blend_equation_separate)(i, ops[0], ops[1]);
+                        }
+                        None => (o.disable)(glow::BLEND, i),
+                    }
                 }
-                None => gl.disable_draw_buffer(glow::BLEND, i),
+                None => {
+                    gl.color_mask_draw_buffer(i, r, g, b, a);
+                    match target.blend {
+                        Some((color, alpha, ops)) => {
+                            gl.enable_draw_buffer(glow::BLEND, i);
+                            gl.blend_func_separate_draw_buffer(i, color[0], color[1], alpha[0], alpha[1]);
+                            gl.blend_equation_separate_draw_buffer(i, ops[0], ops[1]);
+                        }
+                        None => gl.disable_draw_buffer(glow::BLEND, i),
+                    }
+                }
             }
         }
     }
@@ -1068,7 +1117,8 @@ fn begin_pass(gl: &glow::Context, shared: &Shared, st: &mut State, colors: &[Opt
         for (i, c) in colors.iter().enumerate() {
             let Some(c) = c else { continue };
             let Some(v) = c.clear else { continue };
-            gl.color_mask_draw_buffer(i as u32, true, true, true, true);
+            // (all buffers at once: the per-buffer call is GL 4.0 / ES 3.2)
+            gl.color_mask(true, true, true, true);
             match c.view.format().sample_type() {
                 t::TextureSampleType::Uint => gl.clear_buffer_u32_slice(glow::COLOR, i as u32, &[v.r as u32, v.g as u32, v.b as u32, v.a as u32]),
                 t::TextureSampleType::Sint => gl.clear_buffer_i32_slice(glow::COLOR, i as u32, &[v.r as i32, v.g as i32, v.b as i32, v.a as i32]),
@@ -1569,7 +1619,7 @@ fn zero_range(gl: &glow::Context, shared: &Shared, tex: &Texture, mips: Range<u3
                         }
                     } else {
                         gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
-                        gl.color_mask_draw_buffer(0, true, true, true, true);
+                        gl.color_mask(true, true, true, true);
                         gl.clear_buffer_f32_slice(glow::COLOR, 0, &[0.0; 4]);
                     }
                 }
