@@ -300,7 +300,7 @@ fn bake(shared: &Arc<Shared>, cmds: &[Cmd]) -> Option<Baked> {
             let (b, _, _) = index.as_ref().expect("draw_indexed without an index buffer");
             rec.need(&b.0.track, None, D3D12_RESOURCE_STATE_INDEX_BUFFER);
         }
-        if bind_roots(&mut rec, &r, &p.layout, &mut state, &p.label) || p.layout.heap_buffer_writes {
+        if bind_roots(&mut rec, &r, &p.layout, &mut state, &p.label) || p.layout.heap_buffer_writes || p.layout.heap_storage {
             rec.failed = true;
         }
         heap_buffers |= p.layout.heap_buffers;

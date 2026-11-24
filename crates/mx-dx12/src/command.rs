@@ -796,6 +796,17 @@ pub(crate) fn need_heap_buffers(rec: &mut Recording) {
     rec.heap_buffers_applied = heap.buffer_generation;
 }
 
+/// Put the textures with storage views in the heap in `UNORDERED_ACCESS`, for a draw or
+/// dispatch whose shaders write storage textures through the heap (which ones, mX does not
+/// know). Textures the next operation does not write go back home after it (`Track::end_scope`).
+pub(crate) fn need_heap_storage(rec: &mut Recording) {
+    let shared = rec.shared.clone();
+    let heap = shared.heap.lock();
+    for track in heap.storage_textures() {
+        rec.track.need(track, None, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+}
+
 /// Write the root tables the pipeline reads and move their resources to the states they are
 /// read in. Returns whether a storage resource is bound (written).
 pub(crate) fn bind_roots(rec: &mut impl Target, r: &impl Roots, layout: &Layout, state: &mut PassState, label: &str) -> bool {
@@ -1063,10 +1074,13 @@ impl RenderPass<'_> {
         if p.layout.heap_buffers {
             need_heap_buffers(rec);
         }
+        if p.layout.heap_storage {
+            need_heap_storage(rec);
+        }
         if rec.uav_dirty {
             rec.track.uav_barrier();
         }
-        rec.uav_dirty = writes || p.layout.heap_buffer_writes;
+        rec.uav_dirty = writes || p.layout.heap_buffer_writes || p.layout.heap_storage;
         rec.barriers();
         if self.vertex_dirty {
             for (i, v) in self.vertex.iter().enumerate() {
@@ -1297,6 +1311,9 @@ impl ComputePass<'_> {
         rec.track.begin_scope();
         self.state.dirty = !0;
         let writes = bind_roots(rec, &r, &p.layout, &mut self.state, &p.label);
+        if p.layout.heap_storage {
+            need_heap_storage(rec);
+        }
         rec.track.end_scope();
         if p.layout.heap_buffers {
             need_heap_buffers(rec);
@@ -1304,7 +1321,7 @@ impl ComputePass<'_> {
         if rec.uav_dirty {
             rec.track.uav_barrier();
         }
-        rec.uav_dirty = writes || p.layout.heap_buffer_writes;
+        rec.uav_dirty = writes || p.layout.heap_buffer_writes || p.layout.heap_storage;
         rec.barriers();
         match groups {
             Some(g) => flush_constants(&r, &p.layout, &mut self.state, g),

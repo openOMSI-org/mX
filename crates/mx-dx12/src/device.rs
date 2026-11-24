@@ -298,7 +298,8 @@ impl Adapter {
             max_texture_dimension_2d: D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION,
             max_texture_dimension_3d: D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION,
             max_texture_array_layers: D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION,
-            max_bindless_textures: (MAX_VIEW_HEAP - 1 - BLOCK * BLOCKS).min(500_000),
+            // (two descriptors per texture slot: its SRV, and its UAV for storage views)
+            max_bindless_textures: ((MAX_VIEW_HEAP - 1 - BLOCK * BLOCKS) / 2).min(250_000),
             max_bindless_samplers: mx_shader::hlsl::SAMPLER_HEAP_SIZE,
             // (two descriptors per buffer view; `request_device` fits both kinds in the heap)
             max_bindless_buffers: 200_000,
@@ -406,7 +407,7 @@ impl Adapter {
         let limits = self.limits();
         let textures = desc.bindless_textures.min(limits.max_bindless_textures).max(1);
         let samplers = desc.bindless_samplers.min(limits.max_bindless_samplers).max(1);
-        let room = (MAX_VIEW_HEAP - 1 - BLOCK * BLOCKS).saturating_sub(textures) / 2;
+        let room = (MAX_VIEW_HEAP - 1 - BLOCK * BLOCKS).saturating_sub(2 * textures) / 2;
         let buffers = desc.bindless_buffers.min(limits.max_bindless_buffers).min(room).max(1);
         let device = a.device.clone();
         let qdesc = D3D12_COMMAND_QUEUE_DESC {

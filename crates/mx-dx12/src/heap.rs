@@ -6,11 +6,12 @@
 //!
 //! | descriptors | use |
 //! |-------------|-----|
-//! | `0 .. T` | bindless texture slots (`TextureView::index`) |
+//! | `0 .. T` | bindless texture slots (`TextureView::index`, `Tlas::index`): SRVs of texture views and of top-level acceleration structures |
 //! | `T` | the heap group's sampler index buffer (the identity: entry `i` holds `i`) |
 //! | `T + 1 .. T + 1 + B` | bindless buffer slots (`BufferView::index`) as raw SRVs |
 //! | `T + 1 + B .. T + 1 + 2B` | the same slots as raw UAVs (null for views made read-only) |
-//! | `T + 1 + 2B ..` | blocks of [`BLOCK`] descriptors for root tables, one encoder at a time |
+//! | `T + 1 + 2B .. 2T + 1 + 2B` | the texture slots as UAVs: storage-texture views (null for the others) |
+//! | `2T + 1 + 2B ..` | blocks of [`BLOCK`] descriptors for root tables, one encoder at a time |
 
 use std::collections::HashMap;
 
@@ -110,7 +111,7 @@ impl Views {
             crate::set_name(&h, what);
             Ok(h)
         };
-        let view_heap = heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, textures + 1 + 2 * buffers + BLOCK * BLOCKS, "mX view heap")?;
+        let view_heap = heap(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 2 * textures + 1 + 2 * buffers + BLOCK * BLOCKS, "mX view heap")?;
         let sampler_heap = heap(D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, mx_shader::hlsl::SAMPLER_HEAP_SIZE, "mX sampler heap")?;
         // SAFETY: plain getters on live objects.
         unsafe {
@@ -189,6 +190,13 @@ impl Views {
                 },
             },
         };
+        let tex2d_uav = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+            Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R8G8B8A8_UNORM,
+            ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
+            Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                Texture2D: D3D12_TEX2D_UAV { MipSlice: 0, PlaneSlice: 0 },
+            },
+        };
         let uav = D3D12_UNORDERED_ACCESS_VIEW_DESC {
             Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32_TYPELESS,
             ViewDimension: D3D12_UAV_DIMENSION_BUFFER,
@@ -207,6 +215,7 @@ impl Views {
         unsafe {
             for s in tex {
                 device.CreateShaderResourceView(None, Some(&tex2d), self.view_cpu(s));
+                device.CreateUnorderedAccessView(None, None, Some(&tex2d_uav), self.view_cpu(self.storage_uav(s)));
             }
             for s in buf {
                 device.CreateShaderResourceView(None, Some(&srv), self.view_cpu(self.buffer_srv(s)));
@@ -220,9 +229,14 @@ impl Views {
         self.textures + 1 + self.buffers + slot
     }
 
+    /// The UAV of texture slot `slot` (a storage-texture view's).
+    pub fn storage_uav(&self, slot: u32) -> u32 {
+        self.textures + 1 + 2 * self.buffers + slot
+    }
+
     /// The first descriptor of root-table block `b`.
     pub fn block_start(&self, b: u32) -> u32 {
-        self.textures + 1 + 2 * self.buffers + b * BLOCK
+        2 * self.textures + 1 + 2 * self.buffers + b * BLOCK
     }
 }
 
@@ -244,6 +258,11 @@ pub(crate) struct Heap {
     heap_buffers: HashMap<usize, (Track, u32, u32)>,
     /// Bumped whenever `heap_buffers` changes.
     pub buffer_generation: u64,
+    /// The textures with storage views in the heap (by resource), with how many: a dispatch or
+    /// draw that writes storage textures through the heap needs them in `UNORDERED_ACCESS`.
+    storage_textures: HashMap<usize, (Track, u32)>,
+    /// Top-level acceleration structures released but maybe still read through the heap.
+    retired_tlases: Vec<(u64, std::sync::Arc<crate::rt::TlasShared>)>,
     free_blocks: Vec<u32>,
 }
 
@@ -257,6 +276,8 @@ impl Heap {
             retired_buffers: Vec::new(),
             heap_buffers: HashMap::new(),
             buffer_generation: 1,
+            storage_textures: HashMap::new(),
+            retired_tlases: Vec::new(),
             free_blocks: (0..BLOCKS).rev().collect(),
         }
     }
@@ -307,6 +328,36 @@ impl Heap {
         self.textures.alloc("textures")
     }
 
+    /// A storage view of `texture` went into the heap.
+    pub fn add_storage(&mut self, texture: &Texture) {
+        let key = windows::core::Interface::as_raw(&texture.0.raw) as usize;
+        let e = self.storage_textures.entry(key).or_insert_with(|| (texture.0.track.clone(), 0));
+        e.1 += 1;
+    }
+
+    /// A storage view of `texture` left the heap.
+    pub fn remove_storage(&mut self, texture: &Texture) {
+        let key = windows::core::Interface::as_raw(&texture.0.raw) as usize;
+        if let Some(e) = self.storage_textures.get_mut(&key) {
+            e.1 -= 1;
+            if e.1 == 0 {
+                self.storage_textures.remove(&key);
+            }
+        }
+    }
+
+    /// The textures shaders may write through the heap's storage-texture views.
+    pub fn storage_textures(&self) -> impl Iterator<Item = &Track> {
+        self.storage_textures.values().map(|(t, _)| t)
+    }
+
+    /// Release the texture slot of a top-level acceleration structure (reused after submission
+    /// `after` is done) and keep the structure, and those it was built from, alive until then.
+    pub fn release_tlas(&mut self, slot: u32, after: u64, tlas: std::sync::Arc<crate::rt::TlasShared>) {
+        self.textures.release(slot, after);
+        self.retired_tlases.push((after, tlas));
+    }
+
     /// Release a texture slot (reused after submission `after` is done) and keep the texture
     /// alive until then.
     pub fn release_texture(&mut self, slot: u32, after: u64, texture: &Texture) {
@@ -340,6 +391,7 @@ impl Heap {
         self.samplers.reclaim(completed, &mut sampler_slots);
         self.buffers.reclaim(completed, &mut buf_slots);
         self.retired_buffers.retain(|(after, _)| *after > completed);
+        self.retired_tlases.retain(|(after, _)| *after > completed);
         let mut done = Vec::new();
         self.retired.retain(|(after, t)| {
             if *after <= completed {

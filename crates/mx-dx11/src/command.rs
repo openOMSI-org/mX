@@ -922,8 +922,12 @@ fn gather(ctx: &Ctx, shared: &Shared, st: &State, b: &StageBindings) -> Binds {
                 out.samplers.push((reg, s.clone()));
             }
         } else if mx_shader::heap::is_texture(h) {
-            if let Some(s) = heap.texture(index) {
-                out.srvs.push((reg, s.clone()));
+            if let Some(s) = heap.texture(index).and_then(|t| t.srv.clone()) {
+                out.srvs.push((reg, s));
+            }
+        } else if mx_shader::heap::is_storage_texture(h) {
+            if let Some(u) = heap.texture(index).and_then(|t| t.uav.clone()) {
+                out.uavs.push((reg, u));
             }
         } else if let Some(bs) = heap.buffer(index)
             && let Ok(v) = bs.buffer.range_views(bs.offset, bs.size)

@@ -296,7 +296,8 @@ impl Texture {
     }
 
     /// A view. With `TEXTURE_BINDING` usage it gets a heap index ([`TextureView::index`]):
-    /// its shader resource view.
+    /// its shader resource view; as a storage texture (`STORAGE_BINDING`, one mip of a 2D view)
+    /// too, with its unordered access view.
     pub fn create_view(&self, desc: &t::TextureViewDescriptor<'_>) -> Result<TextureView> {
         let tex = &self.0;
         let layers = self.layers();
@@ -330,7 +331,17 @@ impl Texture {
         } else {
             None
         };
-        let slot = srv.clone().map(|s| tex.shared.heap.lock().add_texture(s)).transpose()?;
+        // (a storage texture of the heap: its UAV, bound to the slots of heap storage views)
+        let uav = if t::is_heap_storage_view(tex.usage, format, dimension, mip_count) {
+            Some(view.uav()?)
+        } else {
+            None
+        };
+        let slot = if srv.is_some() || uav.is_some() {
+            Some(tex.shared.heap.lock().add_texture(crate::heap::TextureSlot { srv: srv.clone(), uav: uav.clone() })?)
+        } else {
+            None
+        };
         Ok(TextureView(Arc::new(ViewInner {
             texture: view.texture.clone(),
             format: view.format,
@@ -344,7 +355,7 @@ impl Texture {
             srv,
             rtvs: Mutex::new(HashMap::new()),
             dsv: Mutex::new(HashMap::new()),
-            uav: Mutex::new(None),
+            uav: Mutex::new(uav),
         })))
     }
 }

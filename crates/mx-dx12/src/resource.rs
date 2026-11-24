@@ -480,7 +480,8 @@ impl Texture {
         &self.0.raw
     }
 
-    /// A view. With `TEXTURE_BINDING` usage it gets a bindless index ([`TextureView::index`]).
+    /// A view. With `TEXTURE_BINDING` usage, or as a storage texture (`STORAGE_BINDING`, one mip
+    /// of a 2D view), it gets a bindless index ([`TextureView::index`]).
     pub fn create_view(&self, desc: &t::TextureViewDescriptor<'_>) -> Result<TextureView> {
         let tex = &self.0;
         let shared = &tex.shared;
@@ -510,12 +511,14 @@ impl Texture {
             base_array_layer: desc.base_array_layer,
             array_layer_count: layer_count,
             slot: None,
+            storage: false,
             srv: None,
             uav: None,
             rtv: None,
             dsv: None,
         };
         let mut cpu = shared.cpu.lock();
+        let heap_storage = t::is_heap_storage_view(tex.usage, format, dimension, mip_count) && srv_format.is_some();
         if tex.usage.contains(t::TextureUsages::TEXTURE_BINDING)
             && let Some(f) = srv_format
         {
@@ -539,6 +542,20 @@ impl Texture {
             // SAFETY: as above.
             unsafe { device.CreateUnorderedAccessView(&tex.raw, None, Some(&d), c.handle()) };
             view.uav = Some(c);
+            if heap_storage {
+                // (a storage texture in the heap: the UAV at its slot's place among the storage
+                // views; a texture without TEXTURE_BINDING takes a slot for it alone)
+                let mut heap = shared.heap.lock();
+                let slot = match view.slot {
+                    Some(s) => s,
+                    None => heap.alloc_texture()?,
+                };
+                // SAFETY: as above (the slot's UAV is unused: fresh, or null since its release).
+                unsafe { device.CreateUnorderedAccessView(&tex.raw, None, Some(&d), shared.views.view_cpu(shared.views.storage_uav(slot))) };
+                heap.add_storage(self);
+                view.slot = Some(slot);
+                view.storage = true;
+            }
         }
         if tex.usage.contains(t::TextureUsages::RENDER_ATTACHMENT) {
             if format.has_depth() {
@@ -787,6 +804,8 @@ pub(crate) struct ViewInner {
     pub base_array_layer: u32,
     pub array_layer_count: u32,
     slot: Option<u32>,
+    /// The slot holds a storage view too (its UAV).
+    storage: bool,
     pub srv: Option<Cpu>,
     pub uav: Option<Cpu>,
     pub rtv: Option<Cpu>,
@@ -819,7 +838,11 @@ impl Drop for ViewInner {
     fn drop(&mut self) {
         let shared = &self.texture.0.shared;
         if let Some(slot) = self.slot {
-            shared.heap.lock().release_texture(slot, shared.release_after(), &self.texture);
+            let mut heap = shared.heap.lock();
+            if self.storage {
+                heap.remove_storage(&self.texture);
+            }
+            heap.release_texture(slot, shared.release_after(), &self.texture);
         }
         let mut cpu = shared.cpu.lock();
         for d in [self.srv, self.uav].into_iter().flatten() {
