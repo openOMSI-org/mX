@@ -924,6 +924,11 @@ impl Shared {
             // SAFETY: a plain getter.
             let reason = unsafe { self.device.GetDeviceRemovedReason() };
             crate::dred::log_once("waiting for the GPU");
+            // (a removed device finishes nothing more: what the submissions held goes now -
+            // kept, it held the last frames' swapchain buffers, and with them the flip-model
+            // swapchain on the window, whose last picture stayed on screen over the frames of
+            // the Vulkan device the game went on with: a grey window, openOMSI #4223)
+            drop(std::mem::take(&mut *self.in_flight.lock()));
             return Err(Error::DeviceLost(format!("device removed: {reason:?}")));
         }
         let finished: Vec<Retired> = {
