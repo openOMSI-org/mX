@@ -1509,6 +1509,11 @@ impl Device {
         self.shared.caps.timestamps
     }
 
+    /// Whether the device is known lost (a call on it said so; Direct3D 12 tells it at any time).
+    pub fn is_lost(&self) -> bool {
+        false
+    }
+
     /// Texture views in the heap right now.
     pub fn bindless_textures_in_use(&self) -> usize {
         self.shared.heap.lock().textures_in_use()

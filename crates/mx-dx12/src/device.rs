@@ -924,6 +924,11 @@ impl Shared {
             // SAFETY: a plain getter.
             let reason = unsafe { self.device.GetDeviceRemovedReason() };
             crate::dred::log_once("waiting for the GPU");
+            // (a removed device finishes nothing more: what the submissions held goes now -
+            // kept, it held the last frames' swapchain buffers, and with them the flip-model
+            // swapchain on the window, whose last picture stayed on screen over the frames of
+            // the Vulkan device the game went on with: a grey window, openOMSI #4223)
+            drop(std::mem::take(&mut *self.in_flight.lock()));
             return Err(Error::DeviceLost(format!("device removed: {reason:?}")));
         }
         let finished: Vec<Retired> = {
@@ -1030,6 +1035,13 @@ impl Device {
     /// Timestamp queries (as the adapter's `supports_timestamps`).
     pub fn supports_timestamps(&self) -> bool {
         true
+    }
+
+    /// Whether Direct3D 12 removed the device: every call on it fails from then on, and
+    /// nothing made on it again works (a build that failed so goes on to another device).
+    pub fn is_lost(&self) -> bool {
+        // SAFETY: a plain getter.
+        unsafe { self.shared.device.GetDeviceRemovedReason() }.is_err()
     }
 
     /// Texture views in the heap right now.

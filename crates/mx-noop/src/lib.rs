@@ -275,6 +275,11 @@ impl Device {
     pub fn supports_timestamps(&self) -> bool {
         false
     }
+    /// Whether the device is known lost (a call on it said so; Direct3D 12 tells it at any time).
+    pub fn is_lost(&self) -> bool {
+        false
+    }
+
     pub fn bindless_textures_in_use(&self) -> usize {
         self.shared.textures.lock().in_use
     }

@@ -285,6 +285,16 @@ impl Texture {
                 base_array_layer: desc.base_array_layer,
                 layer_count,
             });
+        // (a view in a format that cannot be a storage image - the sRGB view of an `Rgba8Unorm`
+        // storage texture, sampled only - leaves `STORAGE` out of its usage, which it would
+        // inherit from the image: VUID-VkImageViewCreateInfo-usage-02275)
+        let mut view_usage = vk::ImageViewUsageCreateInfo::default()
+            .usage((conv::image_usage(tex.usage, tex.format) | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST) & !vk::ImageUsageFlags::STORAGE);
+        let info = if tex.owned && tex.usage.contains(t::TextureUsages::STORAGE_BINDING) && !t::is_storage_view_format(format) {
+            info.push_next(&mut view_usage)
+        } else {
+            info
+        };
         // SAFETY: the ranges are inside the image (the caller's contract, checked by the
         // validation layer); the format is one of its view formats.
         let raw = unsafe { shared.raw.create_image_view(&info, None) }.map_err(|e| vk_err("texture view", e))?;

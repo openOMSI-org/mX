@@ -1337,5 +1337,33 @@ impl<A> TlasInstance<A> {
 /// (`binding_array<texture_storage_2d<F, write>>`, heap bindings 12 to 15): one mip of a 2D
 /// view of a texture made with `STORAGE_BINDING`, in a format shaders can write.
 pub fn is_heap_storage_view(usage: TextureUsages, format: TextureFormat, dimension: TextureViewDimension, mip_level_count: u32) -> bool {
-    usage.contains(TextureUsages::STORAGE_BINDING) && dimension == TextureViewDimension::D2 && mip_level_count == 1 && !format.has_depth() && !format.is_compressed() && !format.is_srgb()
+    usage.contains(TextureUsages::STORAGE_BINDING) && dimension == TextureViewDimension::D2 && mip_level_count == 1 && is_storage_view_format(format)
+}
+
+/// Whether a view in `format` can be a storage view at all. A texture made with
+/// `STORAGE_BINDING` may still have views that are not: an sRGB view for sampling of an
+/// `Rgba8Unorm` storage texture. Direct3D 12 removes the device on an sRGB, depth or
+/// block-compressed UAV (`CreateUnorderedAccessView` returns nothing: an invalid one is
+/// `DXGI_ERROR_INVALID_CALL`), and Vulkan wants such a view's usage without `STORAGE`.
+pub fn is_storage_view_format(format: TextureFormat) -> bool {
+    !format.has_depth() && !format.is_compressed() && !format.is_srgb()
+}
+
+#[cfg(test)]
+mod storage_view_tests {
+    use super::*;
+
+    /// Ray tracing's texture atlas: an `Rgba8Unorm` storage texture with an sRGB view for
+    /// sampling. The sRGB view must not be a storage view (Direct3D 12 removed the device on
+    /// its UAV); the plain one is, and takes its heap slot.
+    #[test]
+    fn an_srgb_view_of_a_storage_texture_is_no_storage_view() {
+        let usage = TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
+        assert!(!is_storage_view_format(TextureFormat::Rgba8UnormSrgb));
+        assert!(!is_heap_storage_view(usage, TextureFormat::Rgba8UnormSrgb, TextureViewDimension::D2, 1));
+        assert!(is_storage_view_format(TextureFormat::Rgba8Unorm));
+        assert!(is_heap_storage_view(usage, TextureFormat::Rgba8Unorm, TextureViewDimension::D2, 1));
+        assert!(!is_storage_view_format(TextureFormat::Depth32Float));
+        assert!(!is_storage_view_format(TextureFormat::Bc1RgbaUnorm));
+    }
 }
