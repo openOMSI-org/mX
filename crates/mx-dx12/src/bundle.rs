@@ -21,7 +21,7 @@ use windows::core::Interface;
 
 use crate::command::{Graphics, PassState, Target, bind_heap, bind_roots, flush_constants, need_heap_buffers};
 use crate::conv;
-use crate::device::{ListPair, Shared};
+use crate::device::{ListPair, Shared, recycle_list};
 use crate::heap::BLOCK;
 use crate::track::{Track, read_only};
 use crate::{BindGroup, Buffer, Device, RenderPass, RenderPipeline};
@@ -75,7 +75,7 @@ impl Drop for Baked {
     fn drop(&mut self) {
         self.shared.heap.lock().free_blocks(self.blocks.drain(..));
         if let Some(pair) = self.pair.take() {
-            self.shared.bundle_lists.lock().push(pair);
+            recycle_list(&self.shared.bundle_lists, pair);
         }
     }
 }
@@ -223,7 +223,7 @@ fn bake(shared: &Arc<Shared>, cmds: &[Cmd]) -> Option<Baked> {
     // (its first block before anything is recorded: without one it is replayed)
     let first = shared.heap.lock().alloc_block();
     let Some(first) = first else {
-        shared.bundle_lists.lock().push((alloc, list));
+        // The list is still recording. Do not cache an open list for a later Reset.
         return None;
     };
     let mut rec = BundleRec {

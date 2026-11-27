@@ -550,6 +550,16 @@ pub struct SubmissionIndex(pub u64);
 
 pub(crate) type ListPair = (ID3D12CommandAllocator, ID3D12GraphicsCommandList);
 
+/// Retain a small warm pool, not the lifetime high-water mark of command memory.
+const IDLE_LISTS: usize = 16;
+
+pub(crate) fn recycle_list(pool: &Mutex<Vec<ListPair>>, pair: ListPair) {
+    let mut idle = pool.lock();
+    if idle.len() < IDLE_LISTS {
+        idle.push(pair);
+    }
+}
+
 /// Compiled shaders by (HLSL, entry point, profile).
 pub(crate) type ShaderCache = HashMap<(String, String, String), Arc<Vec<u8>>>;
 
@@ -720,7 +730,7 @@ pub(crate) struct Retired {
 impl Retired {
     fn retire(self, shared: &Shared) {
         if let Some(pair) = self.lists {
-            shared.lists.lock().push(pair);
+            recycle_list(&shared.lists, pair);
         }
         shared.heap.lock().free_blocks(self.blocks);
         drop((self.keep, self.track, self.scratch));
