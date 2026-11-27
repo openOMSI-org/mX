@@ -473,6 +473,8 @@ impl Adapter {
             cpu: Mutex::new(cpu),
             last_submitted: AtomicU64::new(0),
             completed: AtomicU64::new(0),
+            memory_profile: (std::env::var("MX_MEMORY_PROFILE").as_deref() == Ok("1")).then(|| Mutex::new(std::time::Instant::now())),
+            memory_adapter: a.raw.cast::<IDXGIAdapter3>().ok(),
             in_flight: Mutex::new(VecDeque::new()),
             pending: Mutex::new(None),
             ring: Mutex::new(Ring::new()),
@@ -786,6 +788,8 @@ pub(crate) struct Shared {
     pub cpu: Mutex<CpuPools>,
     pub last_submitted: AtomicU64,
     pub completed: AtomicU64,
+    memory_profile: Option<Mutex<std::time::Instant>>,
+    memory_adapter: Option<IDXGIAdapter3>,
     in_flight: Mutex<VecDeque<(u64, Retired)>>,
     pub pending: Mutex<Option<Recording>>,
     /// Staging memory of the queue's writes (used under the `pending` lock).
@@ -954,7 +958,48 @@ impl Shared {
             textures
         };
         drop(textures);
+        self.log_memory_profile();
         Ok(())
+    }
+
+    /// Opt-in sampling after completed work has been reclaimed; no GPU wait is added.
+    fn log_memory_profile(&self) {
+        let Some(last) = &self.memory_profile else {
+            return;
+        };
+        {
+            let mut last = last.lock();
+            if last.elapsed() < std::time::Duration::from_secs(5) {
+                return;
+            }
+            *last = std::time::Instant::now();
+        }
+        let submitted = self.last_submitted.load(Ordering::Acquire);
+        let completed = self.completed.load(Ordering::Acquire);
+        let records = self.in_flight.lock().len();
+        let (idle, pending, flight) = {
+            let ring = self.ring.lock();
+            (
+                ring.free.len(),
+                ring.used.len() + ring.current.is_some() as usize,
+                ring.in_flight.iter().map(|(_, blocks)| blocks.len()).sum::<usize>(),
+            )
+        };
+        let views = self.heap.lock().textures_in_use();
+        let lists = self.lists.lock().len();
+        let bundles = self.bundle_lists.lock().len();
+        log::info!(
+            "mX DX12 memory: submitted={submitted} completed={completed} records={records} staging_4MiB_blocks idle={idle} pending={pending} flight={flight} texture_slots={views} idle_lists={lists} idle_bundles={bundles}"
+        );
+        if let Some(adapter) = &self.memory_adapter {
+            for (name, segment) in [("local", DXGI_MEMORY_SEGMENT_GROUP_LOCAL), ("nonlocal", DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL)] {
+                let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+                // SAFETY: querying a live adapter, with an initialized output structure.
+                if unsafe { adapter.QueryVideoMemoryInfo(0, segment, &mut info) }.is_ok() {
+                    log::info!("mX DX12 memory: {name} usage_bytes={} budget_bytes={}", info.CurrentUsage, info.Budget);
+                }
+            }
+        }
     }
 
     /// Block until the queue has done everything given to it so far. A swapchain's `Present`
