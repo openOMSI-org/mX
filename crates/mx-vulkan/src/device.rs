@@ -1006,6 +1006,9 @@ pub(crate) struct Shared {
     pub spirv: mx_shader::spirv::Options,
 }
 
+// A completed pool can retain its largest command/descriptor allocation in the driver.
+const IDLE_POOLS: usize = 16;
+
 pub(crate) const ALL_READ_WRITE: vk::AccessFlags2 = vk::AccessFlags2::from_raw(vk::AccessFlags2::MEMORY_READ.as_raw() | vk::AccessFlags2::MEMORY_WRITE.as_raw());
 
 impl Shared {
@@ -1353,12 +1356,22 @@ impl Shared {
         // SAFETY: the GPU is done with everything allocated from these pools.
         unsafe {
             for p in rec.cmd_pools {
-                let _ = self.raw.reset_command_pool(p, vk::CommandPoolResetFlags::empty());
-                self.free_cmd_pools.lock().push(p);
+                let mut idle = self.free_cmd_pools.lock();
+                if idle.len() < IDLE_POOLS && self.raw.reset_command_pool(p, vk::CommandPoolResetFlags::empty()).is_ok() {
+                    idle.push(p);
+                } else {
+                    drop(idle);
+                    self.raw.destroy_command_pool(p, None);
+                }
             }
             for p in rec.desc_pools {
-                let _ = self.raw.reset_descriptor_pool(p, vk::DescriptorPoolResetFlags::empty());
-                self.free_desc_pools.lock().push(p);
+                let mut idle = self.free_desc_pools.lock();
+                if idle.len() < IDLE_POOLS && self.raw.reset_descriptor_pool(p, vk::DescriptorPoolResetFlags::empty()).is_ok() {
+                    idle.push(p);
+                } else {
+                    drop(idle);
+                    self.raw.destroy_descriptor_pool(p, None);
+                }
             }
         }
         drop(rec.keep);

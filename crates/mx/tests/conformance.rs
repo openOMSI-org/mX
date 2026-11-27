@@ -2531,3 +2531,24 @@ var<immediate> draw: Draw;
     let got: Vec<u32> = rb.map_read(0..16, |b| bytemuck::cast_slice(b).to_vec()).unwrap();
     assert_eq!(got, [7, u32::MAX, u32::MAX, 9]);
 }
+
+#[test]
+fn command_recording_survives_a_burst_of_retired_and_abandoned_lists() {
+    let g = gpu();
+    let (t, v) = g.target(TextureFormat::Rgba8Unorm);
+    for _ in 0..3 {
+        // Keep more lists alive simultaneously than the idle-cache limit.
+        let mut batch = Vec::new();
+        for _ in 0..32 {
+            let mut enc = g.device.create_command_encoder(None);
+            drop(pass(&mut enc, &v, Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 }));
+            batch.push(enc.finish());
+        }
+        g.device.wait(g.queue.submit(batch)).unwrap();
+        let abandoned: Vec<_> = (0..32).map(|_| g.device.create_command_encoder(None)).collect();
+        drop(abandoned);
+        let mut enc = g.device.create_command_encoder(None);
+        drop(pass(&mut enc, &v, Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 }));
+        assert!(g.read(enc, &t).iter().all(|p| *p == [0, 255, 0, 255]));
+    }
+}
